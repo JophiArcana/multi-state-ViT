@@ -2,17 +2,18 @@ import requests
 from PIL import Image
 
 import datasets
+import numpy as np
 import torch
 import torch.nn as nn
 import torch_cluster
 from matplotlib import pyplot as plt
 from ncut_pytorch import NCUT
-from sklearn.manifold import TSNE
 
 from transformers import ViTPreTrainedModel
 from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel, ViTMAEModel
 from transformers.image_processing_utils import BaseImageProcessor
 
+from infrastructure.dataset import DATASETS
 from infrastructure.settings import *
 
 
@@ -26,42 +27,56 @@ if __name__ == "__main__":
     # # print(indices, indices.shape)
     # raise Exception()
 
-    dataset_name = "UCSC-VLAA/Recap-COCO-30K"
-    model_name = "openai/clip-vit-base-patch32"
+    dataset_name, n_classes = DATASETS["Common"][0]
+    base_model_name = "facebook/dino-vitb8"
 
     # SECTION: Dataset setup
     dataset = datasets.load_dataset(dataset_name)
     dataset_size = dataset["train"].num_rows
-    subsample_size = 10
 
-    image_processor = CLIPImageProcessor.from_pretrained(model_name)
-    images = [
-        dataset["train"][i]["image"]
-        for i in range(subsample_size)
-    ]
-    inputs = image_processor(images=images, return_tensors="pt")
+    images = []
+    class_idx, subsample_size = 0, 10
+    for image in dataset["train"]:
+        if len(images) == 10:
+            break
+        if image["label"] == class_idx:
+            images.append(image["image"])
+
+    def process_grayscale(im):
+        arr = np.array(im)
+        return arr if arr.ndim >= 3 else np.tile(arr[..., None], (1, 1, 3))
+    images = [*map(process_grayscale, images)]
 
     # SECTION: Debugging
-    from transformers import ViTModel
+    from transformers import ViTModel, ViTImageProcessor
     from model.multistate_encoder.modeling_msvitencoder import MultiStateViTConfig, MultiStateViTEncoderModel
-    from model.clustering import ClusteringConfig, NCutFPSClustering
+    from model.clustering import ClusteringConfig
 
-    base = ViTModel.from_pretrained('facebook/dino-vitb8')
+    base = ViTModel.from_pretrained(base_model_name)
+
+    image_size = 224
+    image_processor = ViTImageProcessor.from_pretrained(base_model_name)
+    image_processor.__dict__.update({
+        "size": {"height": image_size, "width": image_size},
+    })
+    inputs = image_processor(images=images, return_tensors="pt")
 
     model = MultiStateViTEncoderModel(MultiStateViTConfig(
         **base.config.to_dict(),
+        pregeneration_period=10,
         generation_period=2,
         clustering_method="spectral",
         clustering_config=ClusteringConfig(
-            ncut_dim=50, fps_dim=8, fps_ratio=0.5, nms_radius=0.1
+            ncut_dim=100, fps_dim=8, fps_ratio=0.5, nms_radius=0.1
         ),
+        pretrained=base_model_name
     ))
     print(model)
-    print(model.config.to_dict())
-    # for image in images[:3]:
-    #     plt.imshow(image)
-    #     plt.show()
-    print(model(**inputs))
+    print(model.config)
+    for image in images[:3]:
+        plt.imshow(image)
+        plt.show()
+    print(model(**inputs, interpolate_pos_encoding=True))
     raise Exception()
 
     # SECTION: Model setup

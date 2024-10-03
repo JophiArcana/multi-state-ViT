@@ -8,7 +8,14 @@ import torch
 import torch.nn as nn
 from transformers.modeling_outputs import ModelOutput
 from transformers.modeling_utils import PreTrainedModel
-from transformers.models.vit.modeling_vit import ViTPatchEmbeddings, ViTSelfOutput, ViTIntermediate, ViTOutput
+from transformers.models.vit.modeling_vit import (
+    ViTEmbeddings,
+    ViTIntermediate,
+    ViTModel,
+    ViTOutput,
+    ViTPatchEmbeddings,
+    ViTSelfOutput,
+)
 from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
 from transformers.utils import add_code_sample_docstrings, add_start_docstrings, add_start_docstrings_to_model_forward
 
@@ -19,7 +26,7 @@ from model.multistate_encoder.configuration_msvit import MultiStateViTConfig
 _CONFIG_FOR_DOC = "MultiStateViTConfig"
 
 
-class MultiStateViTEncoderEmbeddings(nn.Module):
+class _MultiStateViTEncoderEmbeddings(nn.Module):
     """
     Construct the CLS token, position and patch embeddings.
     """
@@ -91,6 +98,19 @@ class MultiStateViTEncoderEmbeddings(nn.Module):
         embeddings = self.dropout(embeddings)
 
         return embeddings
+
+
+class MultiStateViTEncoderEmbeddings(ViTEmbeddings):
+    """
+    Construct the CLS token, position and patch embeddings.
+    """
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        interpolate_pos_encoding: bool = False,
+    ) -> torch.Tensor:
+        return super().forward(pixel_values, bool_masked_pos, interpolate_pos_encoding)[:, 1:]
 
 
 class MultiStateViTSelfAttention(nn.Module):
@@ -430,7 +450,7 @@ class MultiStateViTEncoderBackbone(nn.Module):
         }
 
         for i, (layer_module, cluster_module) in enumerate(zip(self.layer, self.cluster)):
-            if i != 0 and i % self.config.generation_period == 0:
+            if i >= self.config.pregeneration_period and i % self.config.generation_period == 0:
                 # • Generate subcluster indices
                 child_cluster_indices: torch.LongTensor = cluster_module(cluster_indices, hidden_states)                # [bsz x seq_len]
                 n_child_clusters: torch.LongTensor = child_cluster_indices.max(dim=1).values + 1                        # [bsz x n_clusters]
@@ -632,7 +652,13 @@ class MultiStateViTEncoderModel(MultiStateViTEncoderPreTrainedModel):
         self.pooler = MultiStateViTEncoderPooler() if add_pooling_layer else None
 
         # Initialize weights and apply final processing
-        self.post_init()
+        if self.config.pretrained is not None:
+            base_model = ViTModel.from_pretrained(self.config.pretrained)
+            self.embeddings.load_state_dict(base_model.embeddings.state_dict())
+            self.backbone.layer.load_state_dict(base_model.encoder.layer.state_dict())
+            self._backward_compatibility_gradient_checkpointing()
+        else:
+            self.post_init()
 
     def get_input_embeddings(self) -> ViTPatchEmbeddings:
         return self.embeddings.patch_embeddings
