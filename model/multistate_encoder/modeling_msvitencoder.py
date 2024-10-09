@@ -382,7 +382,7 @@ class MultiStateViTEncoderBackbone(nn.Module):
 
         self.layer = nn.ModuleList([MultiStateViTEncoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.cluster = nn.ModuleList([
-            CLUSTERING_CLASSES[config.clustering_method](config.clustering_config)
+            CLUSTERING_CLASSES[config.clustering_config.model_type](config.clustering_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.gradient_checkpointing = False

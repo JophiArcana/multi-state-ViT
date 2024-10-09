@@ -4,7 +4,7 @@ from typing import Any
 
 from transformers import ViTConfig
 
-from model.clustering import ClusteringConfig
+from model.clustering.modeling import ClusteringConfig
 
 
 class MultiStateViTConfig(ViTConfig):
@@ -28,7 +28,6 @@ class MultiStateViTConfig(ViTConfig):
         self,
         pregeneration_period: int = 4,
         generation_period: int = 2,
-        clustering_method: str = "spectral",
         clustering_config: ClusteringConfig = None,
         pretrained: str = None,
         **kwargs: Any
@@ -37,7 +36,6 @@ class MultiStateViTConfig(ViTConfig):
 
         self.pregeneration_period = pregeneration_period
         self.generation_period = generation_period
-        self.clustering_method = clustering_method
         self.clustering_config = clustering_config
         self.pretrained = pretrained
 

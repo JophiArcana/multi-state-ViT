@@ -1,61 +1,31 @@
-import itertools
-from typing import *
+from dataclasses import dataclass
 
 import numpy as np
 import torch
-import torch.nn as nn
 from fast_pytorch_kmeans import KMeans
 from ncut_pytorch import NCUT
 from sklearn.cluster import HDBSCAN
 
-from transformers.configuration_utils import PretrainedConfig
-from transformers.utils import PushToHubMixin
-
 from infrastructure.settings import DEVICE
+from model.clustering.modeling import ClusteringConfig, ClusteringModule
 
 
-class ClusteringConfig(PretrainedConfig):
-    def __init__(self, **kwargs: Any):
-        super(PushToHubMixin, self).__init__()
-        for key, value in kwargs.items():
-            try:
-                setattr(self, key, value)
-            except AttributeError as err:
-                print(f"Can't set {key} with value {value} for {self}")
-                raise err
+@dataclass
+class HDBBoostedSpectralClusteringConfig(ClusteringConfig):
+    model_type: str = "spectral"
 
 
-class ClusteringModule(nn.Module):
-    """
-    Args:
-        x (torch.FloatTensor): batched tensor of latents to cluster [B... x D]
-    
-    Returns:
-        t (torch.IntTensor): batched tensor of cluster indices [B...] where -1 marks a latent not belonging to any strongly represented cluster
-        v (torch.FloatTensor): tensor of cluster means [K x D]
-    """
+class HDBBoostedSpectralClustering(ClusteringModule):
+    def __init__(self, config: HDBBoostedSpectralClusteringConfig):
+        super().__init__(config)
+        self.ncut = NCUT(num_eig=self.config.ncut_dim, device=DEVICE)
+        self.hdb = HDBSCAN(allow_single_cluster=True)
+
     def forward(
         self,
         parent_indices: torch.LongTensor,   # [bsz x seq_len]
         x: torch.FloatTensor,               # [bsz x seq_len x embed_dim]
     ) -> torch.LongTensor:
-        raise NotImplementedError()
-
-
-class HDBBoostedSpectralClustering(ClusteringModule):
-    def __init__(self, config: ClusteringConfig):
-        super().__init__()
-        self.ncut_dim = config.ncut_dim
-        self.ncut = NCUT(num_eig=self.ncut_dim + 1, device=DEVICE)
-
-        self.hdb = HDBSCAN(allow_single_cluster=True)
-
-
-    def forward(
-        self,
-        parent_indices: torch.LongTensor,   # [bsz x seq_len]
-        x: torch.FloatTensor,               # [bsz x seq_len x embed_dim]
-    ) -> torch.LongTensor:                  # [bsz x seq_len]
         bsz, N = parent_indices.shape
 
         # for i in range(np.prod(batch_shape)):
@@ -82,10 +52,8 @@ class HDBBoostedSpectralClustering(ClusteringModule):
 
         with torch.no_grad():
             flattened_x = x.flatten(0, -2)                                                  # [(bsz * N) x D]
-            flattened_ncut_x, _ = self.ncut.fit_transform(flattened_x)                      # [(bsz * N) x (N_D + 1)]
-
-            ncut_x = flattened_ncut_x[:, 1:].reshape(bsz, N, self.ncut_dim)                 # [bsz x N x N_D]
-            flattened_ncut_x = flattened_ncut_x[:, 1:]
+            flattened_ncut_x, _ = self.ncut.fit_transform(flattened_x)                      # [(bsz * N) x N_D]
+            ncut_x = flattened_ncut_x.reshape(bsz, N, self.config.ncut_dim)                        # [bsz x N x N_D]
 
             result = torch.zeros((bsz, N), dtype=torch.long)
             n_parent_clusters = torch.max(parent_indices, dim=-1).values + 1
@@ -100,7 +68,7 @@ class HDBBoostedSpectralClustering(ClusteringModule):
                     child_cluster_labels = torch.LongTensor(self.hdb.fit_predict(parent_cluster_features))
                     n_child_clusters = torch.max(child_cluster_labels).item() + 1
 
-                    child_centroid_initializations = torch.zeros((n_child_clusters, self.ncut_dim))
+                    child_centroid_initializations = torch.zeros((n_child_clusters, self.config.ncut_dim))
                     for i in range(n_child_clusters):
                         child_centroid_initializations[i] = torch.mean(parent_cluster_features[child_cluster_labels == i], dim=0)
 
@@ -151,46 +119,6 @@ class HDBBoostedSpectralClustering(ClusteringModule):
 
 
         raise Exception("Here")
-
-
-
-
-
-class LatentGMMClustering(ClusteringModule):
-    def __init__(self, config: ClusteringConfig):
-        super().__init__()
-        self.input_dim = config.input_dim
-        self.hidden_dim = config.hidden_dim
-
-        self.max_clusters = config.max_clusters
-
-        def construct_mlp(dims: List[int]) -> nn.Sequential:
-            return nn.Sequential(
-                *itertools.chain(*[[
-                    nn.Linear(dims[i], dims[i + 1]),
-                    nn.BatchNorm1d(dims[i + 1]),
-                    nn.ReLU(),
-                ] for i in range(len(dims) - 2)]),
-                nn.Linear(dims[-2], dims[-1])
-            )
-
-        self.dims = [self.input_dim, self.input_dim // 2, self.input_dim // 4, self.hidden_dim]
-
-        self.encoder = construct_mlp(self.dims)
-        self.decoder = construct_mlp([*reversed(self.dims)])
-
-    def forward(self, x: torch.FloatTensor) -> Tuple[torch.IntTensor, torch.FloatTensor]:
-        latents = self.encoder(x)
-        raise NotImplementedError()
-
-
-CLUSTERING_CLASSES: Dict[str, type] = {
-    "spectral": HDBBoostedSpectralClustering
-}
-
-
-
-
 
 
 

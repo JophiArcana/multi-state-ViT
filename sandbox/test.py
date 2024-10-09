@@ -1,21 +1,8 @@
-import requests
-from PIL import Image
-
 import datasets
 import numpy as np
-import torch
-import torch.nn as nn
-import torch_cluster
 from matplotlib import pyplot as plt
-from ncut_pytorch import NCUT
-
-from transformers import ViTPreTrainedModel
-from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel, ViTMAEModel
-from transformers.image_processing_utils import BaseImageProcessor
 
 from infrastructure.dataset import DATASETS
-from infrastructure.settings import *
-
 
 if __name__ == "__main__":
 
@@ -37,7 +24,7 @@ if __name__ == "__main__":
     images = []
     class_idx, subsample_size = 0, 10
     for image in dataset["train"]:
-        if len(images) == 10:
+        if len(images) == subsample_size:
             break
         if image["label"] == class_idx:
             images.append(image["image"])
@@ -50,7 +37,7 @@ if __name__ == "__main__":
     # SECTION: Debugging
     from transformers import ViTModel, ViTImageProcessor
     from model.multistate_encoder.modeling_msvitencoder import MultiStateViTConfig, MultiStateViTEncoderModel
-    from model.clustering import ClusteringConfig
+    from model.clustering.modeling_fps import FPSClusteringConfig
 
     base = ViTModel.from_pretrained(base_model_name)
 
@@ -65,17 +52,21 @@ if __name__ == "__main__":
         **base.config.to_dict(),
         pregeneration_period=10,
         generation_period=2,
-        clustering_method="spectral",
-        clustering_config=ClusteringConfig(
-            ncut_dim=100, fps_dim=8, fps_ratio=0.5, nms_radius=0.1
+        clustering_config=FPSClusteringConfig(
+            ncut_dim=100,
+            fps_dim=8,
+            fps_sample1=300,
+            fps_sample2=100,
+            fps_supersample2=120,
+            cosine_similarity_threshold=0.9,
         ),
         pretrained=base_model_name
     ))
     print(model)
     print(model.config)
-    for image in images[:3]:
-        plt.imshow(image)
-        plt.show()
+    # for image in images[:3]:
+    #     plt.imshow(image)
+    #     plt.show()
     print(model(**inputs, interpolate_pos_encoding=True))
     raise Exception()
 
@@ -89,7 +80,6 @@ if __name__ == "__main__":
     # model.embeddings(**inputs)
     a = model.get_input_embeddings()(inputs["pixel_values"])
     print(a.dtype, a.shape)
-    import inspect
 
     print()
     print(model.vision_model.embeddings(inputs["pixel_values"]).shape)
