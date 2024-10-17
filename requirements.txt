@@ -1,7 +1,7 @@
 numpy==1.26.4
 matplotlib==3.9.2
 ipython==8.25.0
-torch~=2.4.0
+# torch~=2.4.0
 tensordict==0.5.0
 jupyter==1.0.0
 attrs~=23.1.0
@@ -24,12 +24,14 @@ huggingface_hub==0.23.4
 control~=0.9.4
 dimarray~=1.2.1
 netcdf4==1.7.1
-ncut-pytorch==1.3.15
-torch-cluster==1.6.3
+ncut-pytorch==1.4.4
+torch-fpsample==0.1.0
 pillow==10.4.0
 scikit-learn~=1.3.0
-requests~=2.31.0
-datasets~=2.12.0
+requests~=2.32.3
+datasets~=3.0.1
+fast_pytorch_kmeans==0.2.0.1
+
 
 
 

@@ -1,30 +1,29 @@
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
 from fast_pytorch_kmeans import KMeans
-from ncut_pytorch import NCUT
 from sklearn.cluster import HDBSCAN
 
-from infrastructure.settings import DEVICE
 from model.clustering.modeling import ClusteringConfig, ClusteringModule
 
 
 @dataclass
 class HDBBoostedSpectralClusteringConfig(ClusteringConfig):
-    model_type: str = "spectral"
+    model_type: str = "hdbscan"
 
 
 class HDBBoostedSpectralClustering(ClusteringModule):
     def __init__(self, config: HDBBoostedSpectralClusteringConfig):
         super().__init__(config)
-        self.ncut = NCUT(num_eig=self.config.ncut_dim, device=DEVICE)
         self.hdb = HDBSCAN(allow_single_cluster=True)
 
     def forward(
         self,
         parent_indices: torch.LongTensor,   # [bsz x seq_len]
         x: torch.FloatTensor,               # [bsz x seq_len x embed_dim]
+        **kwargs: Any,
     ) -> torch.LongTensor:
         bsz, N = parent_indices.shape
 

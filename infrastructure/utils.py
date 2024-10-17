@@ -15,12 +15,12 @@ from typing import *
 import numpy as np
 import torch
 import torch.nn as nn
+import torch_fpsample
 from dimarray import DimArray, Dataset
 from tensordict import TensorDict
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from infrastructure.settings import DEVICE
-from infrastructure.static import TRAINING_DATASET_TYPES, TESTING_DATASET_TYPE
 
 
 _T = TypeVar("_T")
@@ -125,6 +125,12 @@ def mask_dataset_with_total_sequence_length(ds: TensorDict[str, torch.Tensor], t
         sequence_length, batch_size
     ).mT.expand(ds.shape)
     return ds
+
+def fps(x: torch.Tensor, k: int, **kwargs: Any):
+    device = x.device
+    samples, indices = torch_fpsample.sample(x.to("cpu"), k, **kwargs)
+    return samples.to(device), indices.to(device)
+
 
 
 """
@@ -313,41 +319,6 @@ def rgetitem(obj: Dict[str, Any], item: str, *args):
 """
 Argument namespace processing
 """
-class DefaultingParameter(Namespace):
-    def __init__(self, default_key: str = TRAINING_DATASET_TYPES[0], **kwargs):
-        Namespace.__init__(self, **kwargs)
-        self._default_key = default_key
-
-    def __getattr__(self, item):
-        return vars(self).get(item, vars(self)[self._default_key])
-
-    def update(self, **kwargs) -> None:
-        vars(self).update(kwargs)
-
-    def reset(self, **kwargs) -> None:
-        vars(self).clear()
-        vars(self).update(kwargs)
-
-def process_defaulting_roots(o: _T) -> _T:
-    ds_types = (*TRAINING_DATASET_TYPES, TESTING_DATASET_TYPE)
-    if isinstance(o, Namespace):
-        if len(vars(o)) > 0 and all(k in ds_types for k in vars(o)):
-            return DefaultingParameter(**vars(o))
-        else:
-            for k, v in vars(o).items():
-                setattr(o, k, process_defaulting_roots(v))
-            return o
-    else:
-        return DefaultingParameter(**{TRAINING_DATASET_TYPES[0]: o})
-
-def index_defaulting_with_attr(o: object, attr: str = None) -> Any:
-    if isinstance(o, DefaultingParameter):
-        return getattr(o, o._default_key if attr is None else attr)
-    elif isinstance(o, Namespace):
-        return Namespace(**{k: index_defaulting_with_attr(v, attr) for k, v in vars(o).items()})
-    else:
-        return o
-
 def deepcopy_namespace(n: Namespace) -> Namespace:
     def _deepcopy_helper(o: _T) -> _T:
         if isinstance(o, Namespace):

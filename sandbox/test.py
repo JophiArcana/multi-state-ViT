@@ -1,11 +1,16 @@
+#%%
 import datasets
 import numpy as np
+import torch
 from matplotlib import pyplot as plt
+
+import sys
+sys.path.append("/workspace/multi-state-ViT")
 
 from infrastructure.dataset import DATASETS
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     # M = nn.Parameter(torch.randn((1000, 5)))
     # # V, L = NCUT(num_eig=10, device=DEVICE).fit_transform(M)
     # # print(V.shape, L.shape)
@@ -22,12 +27,14 @@ if __name__ == "__main__":
     dataset_size = dataset["train"].num_rows
 
     images = []
-    class_idx, subsample_size = 0, 10
-    for image in dataset["train"]:
-        if len(images) == subsample_size:
-            break
-        if image["label"] == class_idx:
+    class_idx, subsample_size = (0, 1, 2), 100
+    while len(images) < subsample_size:
+        image = dataset["train"][np.random.randint(0, dataset_size)]
+        if image["label"] in class_idx:
             images.append(image["image"])
+    
+    print(len(images))
+    raise Exception()
 
     def process_grayscale(im):
         arr = np.array(im)
@@ -38,7 +45,9 @@ if __name__ == "__main__":
     from transformers import ViTModel, ViTImageProcessor
     from model.multistate_encoder.modeling_msvitencoder import MultiStateViTConfig, MultiStateViTEncoderModel
     from model.clustering.modeling_fps import FPSClusteringConfig
-
+    
+    torch.manual_seed(1212)
+    torch.cuda.empty_cache()
     base = ViTModel.from_pretrained(base_model_name)
 
     image_size = 224
@@ -50,6 +59,7 @@ if __name__ == "__main__":
 
     model = MultiStateViTEncoderModel(MultiStateViTConfig(
         **base.config.to_dict(),
+        _attn_implementation="eager",
         pregeneration_period=10,
         generation_period=2,
         clustering_config=FPSClusteringConfig(
@@ -58,7 +68,7 @@ if __name__ == "__main__":
             fps_sample1=300,
             fps_sample2=100,
             fps_supersample2=120,
-            cosine_similarity_threshold=0.9,
+            cosine_similarity_threshold=0.7,
         ),
         pretrained=base_model_name
     ))
@@ -67,7 +77,8 @@ if __name__ == "__main__":
     # for image in images[:3]:
     #     plt.imshow(image)
     #     plt.show()
-    print(model(**inputs, interpolate_pos_encoding=True))
+    with torch.no_grad():
+        print(model(**inputs, interpolate_pos_encoding=True))
     raise Exception()
 
     # SECTION: Model setup
@@ -118,3 +129,4 @@ if __name__ == "__main__":
 
 
 
+# %%

@@ -28,6 +28,7 @@ class MultiStateViTConfig(ViTConfig):
         self,
         pregeneration_period: int = 4,
         generation_period: int = 2,
+        attention_mask_inf: float = 1e2,
         clustering_config: ClusteringConfig = None,
         pretrained: str = None,
         **kwargs: Any
@@ -36,6 +37,7 @@ class MultiStateViTConfig(ViTConfig):
 
         self.pregeneration_period = pregeneration_period
         self.generation_period = generation_period
+        self.attention_mask_inf = attention_mask_inf
         self.clustering_config = clustering_config
         self.pretrained = pretrained
 

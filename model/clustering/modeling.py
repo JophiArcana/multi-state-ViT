@@ -1,8 +1,12 @@
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
+from ncut_pytorch import NCUT
 from transformers.configuration_utils import PretrainedConfig
+
+from infrastructure.settings import DEVICE
 
 
 @dataclass
@@ -15,6 +19,7 @@ class ClusteringModule(nn.Module):
     def __init__(self, config: ClusteringConfig) -> None:
         super().__init__()
         self.config = config
+        self.ncut = NCUT(num_eig=self.config.ncut_dim, distance="euclidean", device=DEVICE)
 
     """
     Args:
@@ -31,6 +36,7 @@ class ClusteringModule(nn.Module):
         self,
         parent_indices: torch.LongTensor,   # [bsz x seq_len]
         x: torch.FloatTensor,               # [bsz x seq_len x embed_dim]
+        **kwargs: Any,
     ) -> torch.LongTensor:
         raise NotImplementedError()
 
