@@ -11,14 +11,10 @@ from infrastructure.dataset import DATASETS
 
 
 if __name__ == "__main__":
-    # M = nn.Parameter(torch.randn((1000, 5)))
-    # # V, L = NCUT(num_eig=10, device=DEVICE).fit_transform(M)
-    # # print(V.shape, L.shape)
-    # # print(L, V[:, 0])
-    # indices = torch_cluster.fps(M, batch=torch.arange(1000), ratio=0.25)
-    # # print(indices, indices.shape)
-    # raise Exception()
-
+    torch.cuda.empty_cache()
+    # torch.manual_seed(12180202321118367112)
+    print(f"Seed: {torch.seed()}")
+    
     dataset_name, n_classes = DATASETS["Common"][0]
     base_model_name = "facebook/dino-vitb8"
 
@@ -27,14 +23,11 @@ if __name__ == "__main__":
     dataset_size = dataset["train"].num_rows
 
     images = []
-    class_idx, subsample_size = (0, 1, 2), 100
+    class_idx, subsample_size = {0, 1, 2}, 50
     while len(images) < subsample_size:
-        image = dataset["train"][np.random.randint(0, dataset_size)]
+        image = dataset["train"][torch.randint(0, dataset_size, ()).item()]
         if image["label"] in class_idx:
             images.append(image["image"])
-    
-    print(len(images))
-    raise Exception()
 
     def process_grayscale(im):
         arr = np.array(im)
@@ -44,10 +37,8 @@ if __name__ == "__main__":
     # SECTION: Debugging
     from transformers import ViTModel, ViTImageProcessor
     from model.multistate_encoder.modeling_msvitencoder import MultiStateViTConfig, MultiStateViTEncoderModel
-    from model.clustering.modeling_fps import FPSClusteringConfig
-    
-    torch.manual_seed(1212)
-    torch.cuda.empty_cache()
+    from model.clustering.modeling_spectral import SpectralClusteringConfig
+
     base = ViTModel.from_pretrained(base_model_name)
 
     image_size = 224
@@ -62,21 +53,28 @@ if __name__ == "__main__":
         _attn_implementation="eager",
         pregeneration_period=10,
         generation_period=2,
-        clustering_config=FPSClusteringConfig(
-            ncut_dim=100,
-            fps_dim=8,
-            fps_sample1=300,
-            fps_sample2=100,
-            fps_supersample2=120,
-            cosine_similarity_threshold=0.7,
+        clustering_config=SpectralClusteringConfig(
+            ncut_dim=8,
+            ncut_dist="rbf",
+            eigenvalue_threshold=0.05,
+            cluster_size_threshold=0.07,
         ),
+        # clustering_config=FPSClusteringConfig(
+        #     ncut_dim=100,
+        #     fps_dim=8,
+        #     fps_sample1=300,
+        #     fps_sample2=100,
+        #     fps_supersample2=120,
+        #     cosine_similarity_threshold=0.7,
+        # ),
         pretrained=base_model_name
     ))
     print(model)
     print(model.config)
-    # for image in images[:3]:
-    #     plt.imshow(image)
-    #     plt.show()
+    for image in images[:3]:
+        plt.imshow(image)
+        plt.axis("off")
+        plt.show()
     with torch.no_grad():
         print(model(**inputs, interpolate_pos_encoding=True))
     raise Exception()

@@ -155,7 +155,7 @@ class MultiStateViTSelfAttention(nn.Module):
 
         # Apply manual attention mask
         if attention_mask is not None:
-            attention_scores = attention_scores - self.attention_mask_inf * (1 - attention_mask)
+            attention_scores = attention_scores - self.attention_mask_inf * ~attention_mask
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
@@ -183,7 +183,7 @@ class MultiStateViTSdpaSelfAttention(MultiStateViTSelfAttention):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
         query_layer = self.transpose_for_scores(self.query(hidden_states))
         key_layer = self.transpose_for_scores(self.key(hidden_states))
@@ -193,7 +193,7 @@ class MultiStateViTSdpaSelfAttention(MultiStateViTSelfAttention):
             query_layer,
             key_layer,
             value_layer,
-            attn_mask=-self.attention_mask_inf * (1 - attention_mask),
+            attn_mask=-self.attention_mask_inf * ~attention_mask,
             dropout_p=self.attention_probs_dropout_prob if self.training else 0.0,
             is_causal=False,
             scale=None,
@@ -233,7 +233,7 @@ class MultiStateViTAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
         self_outputs = self.attention.forward(hidden_states, attention_mask)
 
@@ -271,7 +271,7 @@ class MultiStateViTEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
         self_attention_outputs = self.attention(
             self.layernorm_before(hidden_states),  # in ViT, layernorm is applied before self-attention
@@ -467,7 +467,7 @@ class MultiStateViTEncoderBackbone(nn.Module):
 
             # • Concatenate TX/RX tokens with latents
             concatenated_states = torch.cat((cluster_tokens.flatten(1, 2), hidden_states), dim=1)                       # [bsz x (2n_clusters + seq_len) x embed_dim]
-
+            
             # • Pass concatenated latents into transformer layer and extract hidden states corresponding to image patches
             if self.gradient_checkpointing and self.training:
                 attention_outputs = self._gradient_checkpointing_func(
@@ -489,11 +489,10 @@ class MultiStateViTEncoderBackbone(nn.Module):
             }
 
             concatenated_attention = attention_outputs[1]                                                               # [bsz x num_heads x (2n_clusters + seq_len) x (2n_clusters + seq_len)]
-            permuted_concatenated_attention = concatenated_attention.permute(0, 2, 3, 1)                                # [bsz x (2n_clusters + seq_len) x (2n_clusters + seq_len) x num_heads]
             for k, (b_idx, k_idx, q_idx) in MultiStateViTEncoderBackbone._construct_attention_mask_indices(cluster_indices).items():
-                layer_output[k] = permuted_concatenated_attention[
+                layer_output[k] = concatenated_attention[
                     :, :, torch.unique(k_idx)[:, None], torch.unique(q_idx)[None, :]
-                ].permute(0, 3, 1, 2)                                                                                   # [bsz x num_heads x ? x ?]
+                ]                                                                                                       # [bsz x num_heads x ? x ?]
 
             # Concatenate computed outputs to running tuple of per-layer outputs
             for k, v in layer_output.items():
@@ -640,6 +639,11 @@ class MultiStateViTEncoderModel(MultiStateViTEncoderPreTrainedModel):
             base_model = ViTModel.from_pretrained(self.config.pretrained)
             self.embeddings.load_state_dict(base_model.embeddings.state_dict())
             self.backbone.layer.load_state_dict(base_model.encoder.layer.state_dict())
+            
+            cls_token = base_model.embeddings.cls_token.data[0, 0]
+            self.backbone.transmitter_token.__init__(cls_token)
+            self.backbone.receiver_token.__init__(cls_token)
+            
             self._backward_compatibility_gradient_checkpointing()
         else:
             self.post_init()
@@ -663,7 +667,7 @@ class MultiStateViTEncoderModel(MultiStateViTEncoderPreTrainedModel):
     )
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
         bool_masked_pos: Optional[torch.BoolTensor] = None,
         interpolate_pos_encoding: Optional[bool] = None,
     ) -> Union[MultiStateViTEncoderModelOutput, MultiStateViTEncoderModelOutputWithPooling]:
