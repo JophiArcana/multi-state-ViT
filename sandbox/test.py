@@ -1,18 +1,21 @@
 #%%
+import sys
+sys.path.append("/workspace/multi-state-ViT")
+from infrastructure.settings import DEVICE
+
 import datasets
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
-
-import sys
-sys.path.append("/workspace/multi-state-ViT")
 
 from infrastructure.dataset import DATASETS
 
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()
-    # torch.manual_seed(12180202321118367112)
+    # torch.manual_seed(11163065284731897840)
+    # torch.manual_seed(2002)
+    # torch.manual_seed(10936251301023808035)
     print(f"Seed: {torch.seed()}")
     
     dataset_name, n_classes = DATASETS["Common"][0]
@@ -56,7 +59,7 @@ if __name__ == "__main__":
         clustering_config=SpectralClusteringConfig(
             ncut_dim=8,
             ncut_dist="rbf",
-            eigenvalue_threshold=0.05,
+            eigenvalue_threshold=0.1,
             cluster_size_threshold=0.07,
         ),
         # clustering_config=FPSClusteringConfig(
@@ -121,7 +124,6 @@ if __name__ == "__main__":
             plt.show()
 
             print(layer, states.shape, X_embedded.shape)
-
 
 
 

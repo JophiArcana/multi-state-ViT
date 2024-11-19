@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -7,12 +8,35 @@ import torch.nn.functional as Fn
 from cuml.cluster import HDBSCAN, KMeans
 # from fast_pytorch_kmeans import KMeans
 from matplotlib import pyplot as plt
-from ncut_pytorch import NCUT
-from sklearn.cluster import HDBSCAN as numpy_HDBSCAN
+from ncut_pytorch import NCUT, kway_ncut
 from sklearn.manifold import TSNE
 
 from infrastructure.settings import DEVICE
 from model.clustering.modeling import ClusteringConfig, ClusteringModule
+
+
+
+class HDBNCUT(NCUT):
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.cluster_size_threshold = 0.01
+        
+    def fit_transform(self, features: torch.FloatTensor, precomputed_sampled_indices: torch.LongTensor = None):
+        torch.seed()
+        U, S, V = torch.pca_lowrank(features, q=8)
+        pca_x = U * S
+        
+        labels = torch.tensor(HDBSCAN(
+            min_cluster_size=int(self.cluster_size_threshold * features.shape[0]),
+            min_samples=512
+        ).fit_predict(pca_x), dtype=torch.long)
+        
+        counts = [torch.sum(labels == i).item() for i in range(torch.max(labels) + 1)]
+        print(torch.unique(labels), f"{counts}/{torch.numel(labels)}")
+        clustered_indices = torch.where(labels != -1)[0]
+        sampled_indices = clustered_indices[torch.randperm(len(clustered_indices))[:self.num_sample]]
+        print(sampled_indices.shape)
+        return super().fit_transform(features, precomputed_sampled_indices)
 
 
 @dataclass
@@ -29,14 +53,18 @@ class SpectralClustering(ClusteringModule):
         self.config = config
         self.ncut = NCUT(
             num_eig=self.config.ncut_dim,
+            # sample_method="random",
+            num_sample=10000,
             distance=self.config.ncut_dist,
-            normalize_features=(self.config.ncut_dist == "cosine"),
-            affinity_focal_gamma=2.0,
+            affinity_focal_gamma=3.0,
             device=DEVICE
         )
         self.iterative_ncut = NCUT(
             num_eig=self.config.ncut_dim,
-            affinity_focal_gamma=2.0,
+            # sample_method="random",
+            num_sample=10000,
+            distance="cosine",
+            affinity_focal_gamma=3.0,
             device=DEVICE
         )
 
@@ -51,8 +79,8 @@ class SpectralClustering(ClusteringModule):
         
         n_parent_clusters, cumulative_n_child_clusters = torch.max(parent_indices).item() + 1, 0
         result = torch.zeros_like(parent_indices)
-        for i in range(n_parent_clusters):
-            index = parent_indices == i
+        for parent_cluster_idx in range(n_parent_clusters):
+            index = parent_indices == parent_cluster_idx
             cluster_x = x[index]                                            # [n x embed_dim]
             
             ncut_x, eigenvalues = self.ncut.fit_transform(cluster_x)        # [n x ncut_dim], [ncut_dim]
@@ -69,46 +97,69 @@ class SpectralClustering(ClusteringModule):
             
             def visualize(ncut_x, normalized_ncut_x):
                 hms = ncut_x.reshape(bsz, 28, 28, 2, self.config.ncut_dim // 2).permute(0, 3, 1, 4, 2).flatten(3, 4).flatten(1, 2)
-                print("asdf")
-                for nc, hm in [*zip(normalized_ncut_x, hms)][:3]:
+                for nc, hm in [*zip(ncut_x, hms)][:3]:
                     plt.rcParams["figure.figsize"] = (5.0 * 2, 5.0 * (self.config.ncut_dim // 2))
                     plt.imshow(hm.numpy(force=True), cmap="bwr")
                     plt.title(f"Iteration {it}")
                     plt.axis("off")
                     plt.show()   
                 
+                all_labels = OrderedDict()
                 # labels = torch.tensor(numpy_HDBSCAN(min_cluster_size=int(0.1 * bsz * N)).fit_predict(normalized_ncut_x.numpy(force=True)), dtype=torch.long).reshape(bsz, N)
-                print("here")
-                labels = torch.tensor(HDBSCAN(
+                spectral_x, _ = self.iterative_ncut.fit_transform(normalized_ncut_x)
+                all_labels["hdbscan"] = labels = torch.tensor(HDBSCAN(
                     min_cluster_size=int(self.config.cluster_size_threshold * bsz * N),
                     min_samples=512
-                ).fit_predict(normalized_ncut_x), dtype=torch.long)
-                print("there")
+                ).fit_predict(spectral_x), dtype=torch.long)
                 
-                n_child_clusters = torch.max(labels).item() + 1
-                cluster_centers = torch.zeros((n_child_clusters, self.config.ncut_dim))
+                n_child_clusters = torch.max(all_labels["hdbscan"]).item() + 1
+                unclustered_indices = labels == -1
+                
+                print(f"n_child_clusters: {n_child_clusters}")
+                if n_child_clusters == 0:
+                    return
+                
+                spectral_x = spectral_x[:, :n_child_clusters]
+                # KMeans Spectral
+                # spectral_x, _ = NCUT(num_eig=n_child_clusters, affinity_focal_gamma=2.0, device=DEVICE).fit_transform(normalized_ncut_x)
+                cluster_centers = torch.zeros((n_child_clusters, n_child_clusters))
                 for cluster_idx in range(n_child_clusters):
-                    cluster_centers[cluster_idx] = torch.mean(normalized_ncut_x[labels == cluster_idx], dim=0)
-                # kmeans_labels = torch.tensor(KMeans(n_clusters=n_child_clusters, init=cluster_centers).fit_predict(normalized_ncut_x), dtype=torch.long)
+                    cluster_centers[cluster_idx] = torch.mean(spectral_x[labels == cluster_idx], dim=0)
+                # km_spectral_labels = torch.clone(labels)
+                all_labels["km_boosted_spectral"] = torch.argmin(torch.cdist(spectral_x, cluster_centers), dim=1)
+                all_labels["km_spectral"] = torch.tensor(KMeans(
+                    n_clusters=n_child_clusters,
+                    init=cluster_centers
+                ).fit_predict(spectral_x), dtype=torch.long)
             
-                labels = labels.reshape(bsz, N)
-                # kmeans_labels = kmeans_labels.reshape(bsz, N)
-                print(torch.unique(labels))
+                # Axis-aligned Spectral
+                aa_boosted_one_hot, RT = kway_ncut(spectral_x[~unclustered_indices], return_rotation=True)
+                all_labels["aa_boosted_spectral"] = torch.argmax(spectral_x @ RT, dim=1)
+                all_labels["aa_spectral"] = torch.argmax(kway_ncut(spectral_x, return_rotation=False), dim=1)
+            
+                all_labels = OrderedDict([
+                    (k, v.reshape(bsz, N))
+                    for k, v in all_labels.items()
+                ])
+                # print([torch.unique(labels_).tolist() for labels_ in all_labels])
                 
                 import einops
                 import matplotlib as mpl
                 colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-                cluster_im = torch.zeros((1, bsz, N, 3))
-                for i in range(n_child_clusters):
-                    cluster_im[0, labels == i] = torch.tensor(mpl.colors.to_rgb(colors[i]))
-                    # cluster_im[1, kmeans_labels == i] = torch.tensor(mpl.colors.to_rgb(colors[i]))
+                fig, axs = plt.subplots(nrows=len(all_labels), ncols=1)
                 
-                num_ims = 3
-                plt.axis("off")
-                plt.imshow(einops.rearrange(
-                    cluster_im[:, :num_ims], "cfg bsz (h w) c -> (cfg h) (bsz w) c",
-                    h=28, w=28
-                ).numpy(force=True))
+                for j, (k, labels_) in enumerate(all_labels.items()):
+                    cluster_im = torch.zeros((bsz, N, 3))
+                    for child_cluster_idx in range(n_child_clusters):
+                        cluster_im[labels_ == child_cluster_idx] = torch.tensor(mpl.colors.to_rgb(colors[child_cluster_idx]))
+                        
+                    num_ims = 3
+                    axs[j].axis("off")
+                    axs[j].imshow(einops.rearrange(
+                        cluster_im[:num_ims], "bsz (h w) c -> h (bsz w) c",
+                        h=28, w=28
+                    ).numpy(force=True))
+                    axs[j].set_title(k)
                 plt.show()
      
     
@@ -119,9 +170,6 @@ class SpectralClustering(ClusteringModule):
             
             for it in range(4):
                 print(f"iteration {it}")
-                if it > 0:
-                    ncut_x, eigenvalues = self.iterative_ncut.fit_transform(normalized_ncut_x)
-                
                 # normalized_ncut_x = ncut_x
                 normalized_ncut_x = Fn.normalize(ncut_x, dim=-1)
                 # normalized_ncut_x = (ncut_x - torch.mean(ncut_x, **kwargs)) / torch.std(ncut_x, **kwargs)
@@ -132,7 +180,9 @@ class SpectralClustering(ClusteringModule):
                 
                 # [bsz x (N) x (ncut_dim)]
                 print(eigenvalues)
-                visualize(ncut_x, normalized_ncut_x)    
+                visualize(ncut_x, normalized_ncut_x)  
+                
+                ncut_x, eigenvalues = self.iterative_ncut.fit_transform(normalized_ncut_x)  
             
             # import seaborn as sns
             # plt.rcdefaults()
