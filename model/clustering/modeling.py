@@ -16,11 +16,6 @@ class ClusteringConfig(PretrainedConfig):
 
 
 class ClusteringModule(nn.Module):
-    def __init__(self, config: ClusteringConfig) -> None:
-        super().__init__()
-        self.config = config
-        self.ncut = NCUT(num_eig=self.config.ncut_dim, distance="euclidean", device=DEVICE)
-
     """
     Args:
         parent_indices (`torch.LongTensor` of shape `(batch_size, sequence_length)`):

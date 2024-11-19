@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
+import einops
 import torch
 import torch.nn as nn
 from transformers.modeling_outputs import ModelOutput
@@ -14,6 +15,8 @@ from transformers.models.vit.modeling_vit import (
     ViTModel,
     ViTOutput,
     ViTPatchEmbeddings,
+    ViTSelfAttention,
+    ViTSdpaSelfAttention,
     ViTSelfOutput,
 )
 from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
@@ -114,35 +117,16 @@ class MultiStateViTEncoderEmbeddings(ViTEmbeddings):
         return super().forward(pixel_values, bool_masked_pos, interpolate_pos_encoding)[:, 1:]
 
 
-class MultiStateViTSelfAttention(nn.Module):
+class MultiStateViTSelfAttention(ViTSelfAttention):
     def __init__(self, config: MultiStateViTConfig) -> None:
-        super().__init__()
-        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
-            raise ValueError(
-                f"The hidden size {config.hidden_size,} is not a multiple of the number of attention "
-                f"heads {config.num_attention_heads}."
-            )
-
-        self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
-
-        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-
-        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        super(ViTSelfAttention, self).__init__(config)
         self.attention_mask_inf = config.attention_mask_inf
-
-    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
-        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(new_x_shape)
-        return x.permute(0, 2, 1, 3)
 
     def forward(
         self,
         hidden_states: torch.FloatTensor,
         attention_mask: Optional[torch.FloatTensor] = None,
+        output_attentions: bool = False,
     ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
         query_layer = self.transpose_for_scores(self.query(hidden_states))
         key_layer = self.transpose_for_scores(self.key(hidden_states))
@@ -155,7 +139,7 @@ class MultiStateViTSelfAttention(nn.Module):
 
         # Apply manual attention mask
         if attention_mask is not None:
-            attention_scores = attention_scores - self.attention_mask_inf * (1 - attention_mask)
+            attention_scores = attention_scores - self.attention_mask_inf * ~attention_mask
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
@@ -170,20 +154,71 @@ class MultiStateViTSelfAttention(nn.Module):
         context_layer = context_layer.view(new_context_layer_shape)
 
         outputs = (context_layer, attention_probs)
-
         return outputs
 
+    def compress_tokens_with_cluster_indices(
+        self,
+        hidden_states: torch.FloatTensor,                                                           # [bsz x N x D]
+        cluster_indices: torch.LongTensor,                                                          # [bsz x N]
+    ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
+        bsz, N, D = hidden_states.shape                                                             # bsz, N, D
+        n_clusters: int = torch.max(cluster_indices).item() + 1                                     # C
 
-class MultiStateViTSdpaSelfAttention(MultiStateViTSelfAttention):
+        query_layer = self.transpose_for_scores(self.query(hidden_states))                          # [bsz x n_heads x N x head_dim]
+        key_layer = self.transpose_for_scores(self.key(hidden_states))                              # [bsz x n_heads x N x head_dim]
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.functional.softmax(attention_scores, dim=-1)                           # [bsz x n_heads x N x N]
+
+        # SECTION: Compress the transmitter and receiver attention probabilities
+        masks = (cluster_indices[..., None] == torch.arange(n_clusters))                            # [bsz x N x C]
+        transmitter_attention_probs = torch.sum((
+            attention_probs[..., None] *                                                            # [bsz x n_heads x N x N x 1]
+            masks[..., None, None, :, :]                                                            # [bsz x 1 x 1 x N x C]
+        ), dim=-2)                                                                                  # [bsz x n_heads x N x C]
+        receiver_attention_probs = torch.transpose(torch.sum((
+            attention_probs[..., None] *                                                            # [bsz x n_heads x N x N x 1]
+            masks[..., None, :, None, :]                                                            # [bsz x 1 x N x 1 x C]
+        ), dim=-3) / torch.sum(masks[..., None, :, None, :], dim=-3), dim0=-2, dim1=-1)             # [bsz x n_heads x C x N]
+
+        # SECTION: Solve for transmitter tokens using least squares
+        transmitter_attention_scores = utils.multiclass_logits(transmitter_attention_probs)         # [bsz x n_heads x N x C]
+        transmitter_attention_scores = transmitter_attention_scores * math.sqrt(self.attention_head_size)
+
+        QmK = query_layer @ self.key.weight.unflatten(0, (self.num_attention_heads, -1))            # [bsz x n_heads x N x D]
+        Qmk = query_layer @ self.key.bias.unflatten(0, (self.num_attention_heads, -1))[..., None]   # [bsz x n_heads x N x 1]
+        S = transmitter_attention_scores - Qmk                                                      # [bsz x n_heads x N x C]
+
+        Xh = torch.zeros((n_clusters, n_clusters, bsz, self.num_attention_heads, N, D))             # [C x C x bsz x n_heads x N x D]
+        Xh[torch.arange(n_clusters), torch.arange(n_clusters)] = QmK
+        Xh = einops.rearrange(Xh, "c1 c2 bsz h n d -> bsz (h n c1) (c2 d)")                         # [bsz x (n_heads * N * C) x (C * D)]
+        Xc = torch.repeat_interleave(torch.eye(self.num_attention_heads * N), n_clusters, dim=0)    # [(n_heads * N * C) x (n_heads * N)]
+
+        X = torch.cat((*torch.broadcast_tensors(Xh, Xc),), dim=-1)                                  # [bsz x (n_heads * N * C) x (C * D + n_heads * N)]
+        y = einops.rearrange(S, "bsz h n c -> bsz (h n c) 1")                                       # [bsz x (n_heads * N * C) x 1]
+
+        W = (torch.linalg.pinv(X) @ y)                                                              # [bsz x (C * D + n_heads * N) x 1]
+        transmitter_tokens = einops.rearrange(W[:, :n_clusters * D], "bsz (c d) 1 -> bsz c d")      # [bsz x C x D]
+
+        raise Exception()
+
+
+
+
+class MultiStateViTSdpaSelfAttention(MultiStateViTSelfAttention, ViTSdpaSelfAttention):
     def __init__(self, config: MultiStateViTConfig) -> None:
-        super().__init__(config)
+        super(MultiStateViTSelfAttention, self).__init__(config)
         self.attention_probs_dropout_prob = config.attention_probs_dropout_prob
-        self.attention_mask_inf = config.attention_mask_inf
 
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        output_attentions: bool = False,
     ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
         query_layer = self.transpose_for_scores(self.query(hidden_states))
         key_layer = self.transpose_for_scores(self.key(hidden_states))
@@ -193,7 +228,7 @@ class MultiStateViTSdpaSelfAttention(MultiStateViTSelfAttention):
             query_layer,
             key_layer,
             value_layer,
-            attn_mask=-self.attention_mask_inf * (1 - attention_mask),
+            attn_mask=-self.attention_mask_inf * ~attention_mask,
             dropout_p=self.attention_probs_dropout_prob if self.training else 0.0,
             is_causal=False,
             scale=None,
@@ -233,7 +268,7 @@ class MultiStateViTAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
         self_outputs = self.attention.forward(hidden_states, attention_mask)
 
@@ -271,7 +306,7 @@ class MultiStateViTEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
     ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
         self_attention_outputs = self.attention(
             self.layernorm_before(hidden_states),  # in ViT, layernorm is applied before self-attention
@@ -467,7 +502,7 @@ class MultiStateViTEncoderBackbone(nn.Module):
 
             # • Concatenate TX/RX tokens with latents
             concatenated_states = torch.cat((cluster_tokens.flatten(1, 2), hidden_states), dim=1)                       # [bsz x (2n_clusters + seq_len) x embed_dim]
-
+            
             # • Pass concatenated latents into transformer layer and extract hidden states corresponding to image patches
             if self.gradient_checkpointing and self.training:
                 attention_outputs = self._gradient_checkpointing_func(
@@ -489,11 +524,10 @@ class MultiStateViTEncoderBackbone(nn.Module):
             }
 
             concatenated_attention = attention_outputs[1]                                                               # [bsz x num_heads x (2n_clusters + seq_len) x (2n_clusters + seq_len)]
-            permuted_concatenated_attention = concatenated_attention.permute(0, 2, 3, 1)                                # [bsz x (2n_clusters + seq_len) x (2n_clusters + seq_len) x num_heads]
             for k, (b_idx, k_idx, q_idx) in MultiStateViTEncoderBackbone._construct_attention_mask_indices(cluster_indices).items():
-                layer_output[k] = permuted_concatenated_attention[
+                layer_output[k] = concatenated_attention[
                     :, :, torch.unique(k_idx)[:, None], torch.unique(q_idx)[None, :]
-                ].permute(0, 3, 1, 2)                                                                                   # [bsz x num_heads x ? x ?]
+                ]                                                                                                       # [bsz x num_heads x ? x ?]
 
             # Concatenate computed outputs to running tuple of per-layer outputs
             for k, v in layer_output.items():
@@ -640,6 +674,11 @@ class MultiStateViTEncoderModel(MultiStateViTEncoderPreTrainedModel):
             base_model = ViTModel.from_pretrained(self.config.pretrained)
             self.embeddings.load_state_dict(base_model.embeddings.state_dict())
             self.backbone.layer.load_state_dict(base_model.encoder.layer.state_dict())
+            
+            cls_token = base_model.embeddings.cls_token.data[0, 0]
+            self.backbone.transmitter_token.__init__(cls_token)
+            self.backbone.receiver_token.__init__(cls_token)
+            
             self._backward_compatibility_gradient_checkpointing()
         else:
             self.post_init()
@@ -663,7 +702,7 @@ class MultiStateViTEncoderModel(MultiStateViTEncoderPreTrainedModel):
     )
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
         bool_masked_pos: Optional[torch.BoolTensor] = None,
         interpolate_pos_encoding: Optional[bool] = None,
     ) -> Union[MultiStateViTEncoderModelOutput, MultiStateViTEncoderModelOutputWithPooling]:

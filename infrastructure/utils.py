@@ -15,7 +15,6 @@ from typing import *
 import numpy as np
 import torch
 import torch.nn as nn
-import torch_fpsample
 from dimarray import DimArray, Dataset
 from tensordict import TensorDict
 from torch.utils._pytree import tree_flatten, tree_unflatten
@@ -126,11 +125,6 @@ def mask_dataset_with_total_sequence_length(ds: TensorDict[str, torch.Tensor], t
     ).mT.expand(ds.shape)
     return ds
 
-def fps(x: torch.Tensor, k: int, **kwargs: Any):
-    device = x.device
-    samples, indices = torch_fpsample.sample(x.to("cpu"), k, **kwargs)
-    return samples.to(device), indices.to(device)
-
 
 
 """
@@ -170,6 +164,10 @@ def complex(t: torch.Tensor | TensorDict[str, torch.Tensor]) -> Union[torch.Tens
 
 def ceildiv(a: int, b: int) -> int:
     return -(-a // b)
+
+def multiclass_logits(t: torch.Tensor) -> torch.Tensor:
+    logits = torch.log(t)
+    return logits - torch.mean(logits, dim=-1, keepdim=True)
 
 def hadamard_conjugation(
         A: torch.Tensor,        # [B... x m x n]
