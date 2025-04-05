@@ -119,7 +119,7 @@ class MultiStateViTEncoderEmbeddings(ViTEmbeddings):
 
 class MultiStateViTSelfAttention(ViTSelfAttention):
     def __init__(self, config: MultiStateViTConfig) -> None:
-        super(ViTSelfAttention, self).__init__(config)
+        ViTSelfAttention.__init__(self, config)
         self.attention_mask_inf = config.attention_mask_inf
 
     def forward(
@@ -128,6 +128,10 @@ class MultiStateViTSelfAttention(ViTSelfAttention):
         attention_mask: Optional[torch.FloatTensor] = None,
         output_attentions: bool = False,
     ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
+        # self.compress_tokens_with_cluster_indices(
+        #     hidden_states,
+        #     torch.randn(hidden_states.shape[:2]) > 0
+        # )
         query_layer = self.transpose_for_scores(self.query(hidden_states))
         key_layer = self.transpose_for_scores(self.key(hidden_states))
         value_layer = self.transpose_for_scores(self.value(hidden_states))
@@ -197,12 +201,16 @@ class MultiStateViTSelfAttention(ViTSelfAttention):
         Xh[torch.arange(n_clusters), torch.arange(n_clusters)] = QmK
         Xh = einops.rearrange(Xh, "c1 c2 bsz h n d -> bsz (h n c1) (c2 d)")                         # [bsz x (n_heads * N * C) x (C * D)]
         Xc = torch.repeat_interleave(torch.eye(self.num_attention_heads * N), n_clusters, dim=0)    # [(n_heads * N * C) x (n_heads * N)]
+        Xc = Xc.expand(bsz, -1, -1)                                                                 # [bsz x (n_heads * N * C) x (n_heads * N)]
 
-        X = torch.cat((*torch.broadcast_tensors(Xh, Xc),), dim=-1)                                  # [bsz x (n_heads * N * C) x (C * D + n_heads * N)]
+        print(Xh.shape, Xc.shape)
+        X = torch.cat((Xh, Xc), dim=-1)                                                             # [bsz x (n_heads * N * C) x (C * D + n_heads * N)]
         y = einops.rearrange(S, "bsz h n c -> bsz (h n c) 1")                                       # [bsz x (n_heads * N * C) x 1]
 
         W = (torch.linalg.pinv(X) @ y)                                                              # [bsz x (C * D + n_heads * N) x 1]
         transmitter_tokens = einops.rearrange(W[:, :n_clusters * D], "bsz (c d) 1 -> bsz c d")      # [bsz x C x D]
+
+        print(hidden_states.shape, transmitter_tokens.shape)
 
         raise Exception()
 
@@ -211,7 +219,7 @@ class MultiStateViTSelfAttention(ViTSelfAttention):
 
 class MultiStateViTSdpaSelfAttention(MultiStateViTSelfAttention, ViTSdpaSelfAttention):
     def __init__(self, config: MultiStateViTConfig) -> None:
-        super(MultiStateViTSelfAttention, self).__init__(config)
+        MultiStateViTSelfAttention.__init__(self, config)
         self.attention_probs_dropout_prob = config.attention_probs_dropout_prob
 
     def forward(
@@ -717,7 +725,7 @@ class MultiStateViTEncoderModel(MultiStateViTEncoderPreTrainedModel):
         expected_dtype = self.embeddings.patch_embeddings.projection.weight.dtype
         if pixel_values.dtype != expected_dtype:
             pixel_values = pixel_values.to(expected_dtype)
-
+            
         embedding_output = self.embeddings(
             pixel_values, bool_masked_pos=bool_masked_pos, interpolate_pos_encoding=interpolate_pos_encoding
         )

@@ -53,7 +53,7 @@ class SpectralClustering(ClusteringModule):
         self.config = config
         self.ncut = NCUT(
             num_eig=self.config.ncut_dim,
-            # sample_method="random",
+            sample_method="random",
             num_sample=10000,
             distance=self.config.ncut_dist,
             affinity_focal_gamma=3.0,
@@ -168,7 +168,7 @@ class SpectralClustering(ClusteringModule):
             kwargs = {"dim": (0,), "keepdim": True}
             s = 1.0
             
-            for it in range(4):
+            for it in range(2):
                 print(f"iteration {it}")
                 # normalized_ncut_x = ncut_x
                 normalized_ncut_x = Fn.normalize(ncut_x, dim=-1)

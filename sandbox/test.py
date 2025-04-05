@@ -14,9 +14,9 @@ from infrastructure.dataset import DATASETS
 if __name__ == "__main__":
     torch.cuda.empty_cache()
     # torch.manual_seed(11163065284731897840)
-    # torch.manual_seed(2002)
+    torch.manual_seed(1212)
     # torch.manual_seed(10936251301023808035)
-    print(f"Seed: {torch.seed()}")
+    # print(f"Seed: {torch.seed()}")
     
     dataset_name, n_classes = DATASETS["Common"][0]
     base_model_name = "facebook/dino-vitb8"
@@ -49,7 +49,7 @@ if __name__ == "__main__":
     image_processor.__dict__.update({
         "size": {"height": image_size, "width": image_size},
     })
-    inputs = image_processor(images=images, return_tensors="pt")
+    inputs = image_processor(images=images, return_tensors="pt")["pixel_values"].to(DEVICE)
 
     model = MultiStateViTEncoderModel(MultiStateViTConfig(
         **base.config.to_dict(),
@@ -79,7 +79,7 @@ if __name__ == "__main__":
         plt.axis("off")
         plt.show()
     with torch.no_grad():
-        print(model(**inputs, interpolate_pos_encoding=True))
+        print(model(inputs, interpolate_pos_encoding=True))
     raise Exception()
 
     # SECTION: Model setup
