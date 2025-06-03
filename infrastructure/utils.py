@@ -34,6 +34,7 @@ def stack_tensor_arr(tensor_arr: np.ndarray[torch.Tensor], dim: int = 0) -> Unio
         result = TensorDict.maybe_dense_stack(tensor_list, dim=dim)
     return result.reshape(*tensor_arr.shape, *t.shape)
 
+
 def stack_module_arr(module_arr: np.ndarray[nn.Module]) -> Tuple[nn.Module, TensorDict[str, torch.Tensor]]:
     params, buffers = torch.func.stack_module_state(module_arr.ravel().tolist())
     td = TensorDict({}, batch_size=module_arr.shape)
@@ -53,6 +54,7 @@ def stack_module_arr(module_arr: np.ndarray[nn.Module]) -> Tuple[nn.Module, Tens
 
     return module_arr.ravel()[0].to(DEVICE), td.to(DEVICE)
 
+
 def stack_module_arr_preserve_reference(module_arr: np.ndarray[nn.Module]) -> Tuple[nn.Module, TensorDict[str, torch.Tensor]]:
     flattened_td = TensorDict.maybe_dense_stack([
         TensorDict({
@@ -63,6 +65,7 @@ def stack_module_arr_preserve_reference(module_arr: np.ndarray[nn.Module]) -> Tu
     ], dim=0)
     td = flattened_td.reshape(module_arr.shape)
     return module_arr.ravel()[0], td.to(DEVICE)
+
 
 def run_module_arr(
         reference_module: nn.Module,
@@ -105,8 +108,10 @@ def run_module_arr(
         ]
         return tree_unflatten(flat_out, out_spec)
 
+
 def double_vmap(func: Callable) -> Callable:
     return torch.vmap(torch.vmap(func))
+
 
 def buffer_dict(td: TensorDict[str, torch.Tensor]) -> nn.Module:
     def _buffer_dict(parent_module: nn.Module, td: TensorDict[str, torch.Tensor]) -> nn.Module:
@@ -118,13 +123,13 @@ def buffer_dict(td: TensorDict[str, torch.Tensor]) -> nn.Module:
         return parent_module
     return _buffer_dict(nn.Module(), td)
 
+
 def mask_dataset_with_total_sequence_length(ds: TensorDict[str, torch.Tensor], total_sequence_length: int) -> TensorDict[str, torch.Tensor]:
     batch_size, sequence_length = ds.shape[-2:]
     ds["mask"] = torch.Tensor(torch.arange(batch_size * sequence_length) < total_sequence_length).view(
         sequence_length, batch_size
     ).mT.expand(ds.shape)
     return ds
-
 
 
 """
@@ -148,26 +153,33 @@ def pow_series(M: torch.Tensor, n: int) -> torch.Tensor:
             result = torch.cat([blocked_result[:, :N], blocked_result[:, N:]], dim=0)
         return result.reshape(1 << k, N, N)[:n]
 
+
 def batch_trace(x: torch.Tensor) -> torch.Tensor:
     return x.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
 
+
 def kl_div(cov1: torch.Tensor, cov2: torch.Tensor) -> torch.Tensor:
     return ((torch.det(cov2) / torch.det(cov1)).log() - cov1.shape[-1] + (torch.inverse(cov2) * cov1).sum(dim=(-2, -1))) / 2
+
 
 def sqrtm(t: torch.Tensor) -> torch.Tensor:
     L, V = torch.linalg.eig(t)
     return (V @ torch.diag_embed(L ** 0.5) @ torch.inverse(V)).real
 
+
 def complex(t: torch.Tensor | TensorDict[str, torch.Tensor]) -> Union[torch.Tensor, TensorDict[str, torch.Tensor]]:
     fn = lambda t_: torch.complex(t_, torch.zeros_like(t_))
     return fn(t) if isinstance(t, torch.Tensor) else t.apply(fn)
 
+
 def ceildiv(a: int, b: int) -> int:
     return -(-a // b)
+
 
 def multiclass_logits(t: torch.Tensor) -> torch.Tensor:
     logits = torch.log(t)
     return logits - torch.mean(logits, dim=-1, keepdim=True)
+
 
 def hadamard_conjugation(
         A: torch.Tensor,        # [B... x m x n]
@@ -179,6 +191,7 @@ def hadamard_conjugation(
     P = A[..., :, None, :, None] * B[..., None, :, None, :]                         # [B... x m x p x n x q]
     coeff = 1 / (1 - alpha[..., :, None, :, None] * beta[..., None, :, None, :])    # [B... x m x p x n x q]
     return torch.sum(P * coeff * C[..., None, None], dim=[-3, -4])
+
 
 def hadamard_conjugation_diff_order1(
         A: torch.Tensor,        # [B... x m x n]
@@ -193,6 +206,7 @@ def hadamard_conjugation_diff_order1(
     _beta1, _beta2 = beta1[..., None, :, None, :], beta2[..., None, :, None, :]
     coeff = alpha_ / ((1 - alpha_ * _beta1) * (1 - alpha_ * _beta2))
     return torch.sum(P * coeff * C[..., None, None], dim=[-3, -4])
+
 
 def hadamard_conjugation_diff_order2(
         B: torch.Tensor,        # [B... x p x q]
@@ -219,10 +233,10 @@ def hadamard_conjugation_diff_order2(
 """
 NumPy Array Comprehension Operations
 """
-
 def multi_iter(arr: np.ndarray | DimArray) -> Iterable[Any]:
     for x in np.nditer(arr, flags=["refs_ok"]):
         yield x[()]
+
 
 def multi_enumerate(arr: np.ndarray | DimArray) -> Iterable[Tuple[Sequence[int], Any]]:
     it = np.nditer(arr, flags=["multi_index", "refs_ok"])
@@ -292,6 +306,7 @@ def rgetattr(obj: object, attr: str, *args):
         return getattr(obj, attr, *args)
     return functools.reduce(_getattr, [obj] + attr.split("."))
 
+
 def rsetattr(obj: object, attr: str, value: Any) -> None:
     def _rsetattr(obj: object, attrs: List[str], value: Any) -> None:
         if len(attrs) == 1:
@@ -301,12 +316,14 @@ def rsetattr(obj: object, attr: str, value: Any) -> None:
             setattr(obj, attrs[0], next_obj)
     _rsetattr(obj, attr.split("."), value)
 
+
 def rhasattr(obj: object, attr: str) -> bool:
     try:
         rgetattr(obj, attr)
         return True
     except AttributeError:
         return False
+
 
 def rgetitem(obj: Dict[str, Any], item: str, *args):
     def _getitem(obj: Dict[str, Any], item: str) -> Any:
@@ -325,6 +342,7 @@ def deepcopy_namespace(n: Namespace) -> Namespace:
             return o
     return _deepcopy_helper(n)
 
+
 def toJSON(o: object):
     if isinstance(o, Namespace):
         return {k: toJSON(v) for k, v in vars(o).items()}
@@ -339,11 +357,14 @@ def toJSON(o: object):
         except TypeError:
             return str(o)
 
+
 def str_namespace(n: Namespace) -> str:
     return json.dumps(toJSON(n), indent=4)
 
+
 def print_namespace(n: Namespace) -> None:
     print(str_namespace(n))
+
 
 def hash_namespace(n: Namespace) -> str:
     return hashlib.sha256(str_namespace(n).encode("utf-8")).hexdigest()[:8]
@@ -359,6 +380,7 @@ class PTR(object):
     def __iter__(self):
         yield self.obj
 
+
 class print_disabled:
     def __enter__(self):
         self._original_stdout = sys.stdout
@@ -367,6 +389,7 @@ class print_disabled:
     def __exit__(self, exc_type, exc_val, exc_tb):
         sys.stdout.close()
         sys.stdout = self._original_stdout
+
 
 def flatten_nested_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     result = {}
@@ -379,6 +402,7 @@ def flatten_nested_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     _flatten_nested_dict((), d)
     return result
 
+
 def nested_vars(n: Namespace) -> Dict[str, Any]:
     result = {}
     def _nested_vars(s: Tuple[str, ...], n: Namespace) -> None:
@@ -390,6 +414,7 @@ def nested_vars(n: Namespace) -> Dict[str, Any]:
     _nested_vars((), n)
     return {".".join(k): v for k, v in result.items()}
 
+
 def nested_type(o: object) -> object:
     if type(o) in [list, tuple]:
         return type(o)(map(nested_type, o))
@@ -398,19 +423,23 @@ def nested_type(o: object) -> object:
     else:
         return type(o)
 
+
 def map_dict(d: Dict[str, Any], func: Callable[[Any], Any]) -> Dict[str, Any]:
     return {
         k: map_dict(v, func) if hasattr(v, "items") else func(v)
         for k, v in d.items()
     }
 
+
 def array_of(o: _T) -> np.ndarray[_T]:
     M = np.array(None, dtype=object)
     M[()] = o
     return M
 
+
 def model_size(m: nn.Module):
     return sum(p.numel() for p in m.parameters())
+
 
 def call_func_with_kwargs(func: Callable, args: Tuple[Any, ...], kwargs: Dict[str, Any]):
     params = inspect.signature(func).parameters
@@ -432,6 +461,7 @@ def call_func_with_kwargs(func: Callable, args: Tuple[Any, ...], kwargs: Dict[st
 def color(z: float, scale: float = 120.) -> np.ndarray:
     k = 2 * np.pi * z / scale
     return (1 + np.asarray([np.sin(k), np.sin(k + 2 * np.pi / 3), np.sin(k + 4 * np.pi / 3)], dtype=float)) / 2
+
 
 def confidence_ellipse(x, y, ax, n_std=1.0, facecolor="none", **kwargs):
     """

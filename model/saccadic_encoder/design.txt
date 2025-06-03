@@ -1,0 +1,58 @@
+What we need to store:
+    * For losses:
+        * Predictive loss: predicted embedding and true embedding pairs
+        * Positional recovery loss: query and corresponding true embedding pair
+        * Preservation loss: encoder embedding and corresponding true embedding pair
+    * For analysis:
+        * Sequence of all queries and their resulting embeddings
+        * Refiner edges
+            * Edges where all nodes that are not the current saccade have converged
+        * Unstable refiner edges
+            * Edges where exactly one node that is not the current saccade is unexplored but the current saccade has not converged
+        * Predictive edges
+            * Edges where all nodes have converged except for one which is unexplored
+        * Complete edges
+            * Edges where all nodes have converged, the most recent one being the current saccade
+        * At test time, need terminal indices and complete edges
+
+How we store it
+    * For each timestep, store
+        * Predicted embedding -> positional query -> matched patterns (pattern indices, node indices) -> refiner input and outputs -> refined embedding
+    * Store (predicted embedding -> positional query -> refined embedding) and terminal index in a tensordict
+    * Store matched patterns in a categorized group of lists
+    * Store refiner input output pairs in concatenated tensordict
+
+
+
+How to do beam search
+    * Idea of allowing one-wildcard patterns amongst no-wildcard patterns does not work
+    * For every no-wildcard pattern there exists many one-wildcard patterns that are strictly more likely
+    * Thus, compare patterns with only identical numbers of wildcards so there are no supersets
+    * This means there are no unstable refiner edges allowed which is OK
+    * But also no complete edges (at least not immediately) because we are forced to predict at terminal nodes
+        * Complete edges can still technically be detected if a predictive edge converges immediately
+    * Modified beam search needs to keep track of a beam for each number of wildcards used
+
+
+
+
+
+    * Need to keep track of two things
+        * Number of wild card positions used
+        * Number of positions yet to fill for each pattern
+    * Store a dictionary from (number of unfilled positions, number of wildcards used) to a tuple
+        * Tuple stores
+            * Pattern index
+            * Node indices
+            * Running joint density function
+            * Running conditional probability function
+
+
+
+How to calculate conditional log-pdf
+    * Demeaned input is D dimensional
+    * Std is D x d dimensional
+    *
+
+
+
