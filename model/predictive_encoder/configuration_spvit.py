@@ -14,7 +14,7 @@
 # limitations under the License.
 """ViT model configuration"""
 
-from typing import Callable
+from typing import Any, Callable, Literal, Sequence
 
 import torch
 
@@ -87,6 +87,7 @@ class PredictiveViTConfig(PretrainedConfig):
 
     def __init__(
         self,
+        pretrained: str = None,
         hidden_size: int = 768,
         num_hidden_layers: int = 12,
         num_attention_heads: int = 12,
@@ -100,14 +101,22 @@ class PredictiveViTConfig(PretrainedConfig):
         qkv_bias: bool = True,
 
         image_size: int = 224,
-        patch_size: int = 16,
+        patch_size: int = 64,
         encoder_stride: int = 16,
-        patch_config: str = "translation",
+        patch_config: str = "scaling",
+        patch_config_distribution: Literal["gaussian", "uniform"] = "uniform",
+        patch_config_scale: float | Sequence[Any] | torch.Tensor = torch.tensor([
+            [0.333, 0.0],
+            [0.333, 0.0],
+            [0.333, -1.0],
+        ]),
+        pe_bias: bool = True,
+        expected_context_length: float = 2.0,
 
         **kwargs,
     ):
         super().__init__(**kwargs)
-
+        self.pretrained = pretrained
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
@@ -124,3 +133,7 @@ class PredictiveViTConfig(PretrainedConfig):
         self.patch_size = patch_size
         self.encoder_stride = encoder_stride
         self.patch_config = patch_config
+        self.patch_config_distribution = patch_config_distribution
+        self.patch_config_scale = patch_config_scale
+        self.pe_bias = pe_bias
+        self.expected_context_length = expected_context_length
