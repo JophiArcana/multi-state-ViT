@@ -2,6 +2,7 @@ from typing import Dict, List, Tuple
 
 DATASETS: Dict[str, List[Tuple[str, int]]] = {
     "Common": [
+        ("ILSVRC/imagenet-1k", 1000),
         ("mrm8488/ImageNet1K-val", 1000),
         ("UCSC-VLAA/Recap-COCO-30K", None),
         ("nateraw/pascal-voc-2012", None),

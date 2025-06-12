@@ -100,6 +100,7 @@ class PredictiveViTConfig(PretrainedConfig):
         num_channels: int = 3,
         qkv_bias: bool = True,
 
+        use_cls_token: bool = True,
         image_size: int = 224,
         patch_size: int = 64,
         encoder_stride: int = 16,
@@ -129,6 +130,7 @@ class PredictiveViTConfig(PretrainedConfig):
         self.num_channels = num_channels
         self.qkv_bias = qkv_bias
 
+        self.use_cls_token = use_cls_token
         self.image_size = image_size
         self.patch_size = patch_size
         self.encoder_stride = encoder_stride

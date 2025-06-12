@@ -15,6 +15,7 @@
 """PyTorch ViT model."""
 
 import math
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 import einops
@@ -26,7 +27,7 @@ from torch import nn
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
     BaseModelOutput,
-    BaseModelOutputWithPooling,
+    # BaseModelOutputWithPooling,
     # ImageClassifierOutput,
     # MaskedImageModelingOutput,
 )
@@ -38,6 +39,7 @@ from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     logging,
+    ModelOutput,
     # replace_return_docstrings,
     # torch_int,
 )
@@ -82,7 +84,7 @@ class PredictiveViTEmbeddings(nn.Module):
         self.position_encoder = nn.Linear(PATCH_CONFIG_DOF[config.patch_config], config.hidden_size, bias=config.pe_bias)
         self.position_decoder = nn.Linear(config.hidden_size, PATCH_CONFIG_DOF[config.patch_config], bias=config.pe_bias)
 
-        self.cls_token = nn.Parameter(torch.randn((config.hidden_size,)), requires_grad=True)
+        self.cls_token = nn.Parameter(torch.randn((config.hidden_size,)), requires_grad=config.use_cls_token)
         self.prd_token = nn.Parameter(torch.randn((config.hidden_size,)), requires_grad=True)
 
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -127,7 +129,7 @@ class PredictiveViTEmbeddings(nn.Module):
         # concatenate CLS and PRD token
         cls_token = self.cls_token.expand(pixel_values.shape[:-3] + (1, self.config.hidden_size,))  # [B... x 1 x D]
         prd_token = self.prd_token.expand(pixel_values.shape[:-3] + (1, self.config.hidden_size,))  # [B... x 1 x D]
-        embeddings = torch.cat((cls_token, embeddings, prd_token,), dim=-2)     # [B... x (N + 2) x D]
+        embeddings = torch.cat((cls_token, embeddings, prd_token,), dim=-2)                         # [B... x (N + 2) x D]
 
         # add dropout
         embeddings = self.dropout(embeddings)
@@ -153,22 +155,78 @@ class PredictiveViTPatchEmbeddings(nn.Module):
             torch.linspace(-1.0, 1.0, patch_size),
         ) + (torch.ones((patch_size, patch_size)),), dim=-1).transpose(dim0=-3, dim1=-2)    # float: [P x P x 3]
 
-        num_channels, hidden_size = config.num_channels, config.hidden_size
+        num_channels, patch_size, hidden_size = config.num_channels, config.patch_size, config.hidden_size
         self.num_channels = num_channels
         self.projection = nn.Sequential(
             nn.Conv2d(num_channels, 64, kernel_size=5, padding=2),  # float: [B... x 64 x P x P]
             nn.ReLU(),                                              # float: [B... x 64 x P x P]
             nn.MaxPool2d(kernel_size=2, stride=2),                  # float: [B... x 64 x P/2 x P/2]
-            nn.Conv2d(64, config.hidden_size // 4, kernel_size=3, padding=1),   # float: [B... x D/4 x P/2 x P/2]
+            nn.Conv2d(64, hidden_size // 4, kernel_size=3, padding=1),          # float: [B... x D/4 x P/2 x P/2]
             nn.ReLU(),                                                          # float: [B... x D/4 x P/2 x P/2]
             nn.MaxPool2d(kernel_size=2, stride=2),                              # float: [B... x D/4 x P/4 x P/4]
-            nn.Conv2d(config.hidden_size // 4, config.hidden_size // 2, kernel_size=3, padding=1),  # float: [B... x D/2 x P/4 x P/4]
-            nn.ReLU(),                                                                              # float: [B... x D/2 x P/4 x P/4]
-            nn.MaxPool2d(kernel_size=2, stride=2),                                                  # float: [B... x D/2 x P/8 x P/8]
-            nn.Conv2d(config.hidden_size // 2, config.hidden_size, kernel_size=3, padding=1),       # float: [B... x D x P/8 x P/8]
-            nn.AvgPool2d(kernel_size=config.patch_size // 8, stride=config.patch_size // 8),        # float: [B... x D x 1 x 1]
+            nn.Conv2d(hidden_size // 4, hidden_size // 2, kernel_size=3, padding=1),    # float: [B... x D/2 x P/4 x P/4]
+            nn.ReLU(),                                                                  # float: [B... x D/2 x P/4 x P/4]
+            nn.MaxPool2d(kernel_size=2, stride=2),                                      # float: [B... x D/2 x P/8 x P/8]
+            nn.Conv2d(hidden_size // 2, hidden_size, kernel_size=3, padding=1),         # float: [B... x D x P/8 x P/8]
+            nn.AvgPool2d(kernel_size=patch_size // 8, stride=patch_size // 8),          # float: [B... x D x 1 x 1]
             nn.Flatten(start_dim=-3, end_dim=-1),
         )
+
+    def visualize_sample(
+        self,
+        pixel_values: torch.Tensor,     # float: [B... x C x H x W]
+        patch_config: torch.Tensor,     # float: [B... x N x ?]
+        NUM_IMS: int = 5,
+    ) -> None:
+        from matplotlib import pyplot as plt
+        from matplotlib.axes import Axes
+
+        bsz = pixel_values.shape[:-3]
+        def normalize_im(im: torch.Tensor) -> torch.Tensor:
+            min_rgb = torch.min(im.flatten(0, -2), dim=0).values
+            max_rgb = torch.max(im.flatten(0, -2), dim=0).values
+            return (im - min_rgb) / (max_rgb - min_rgb)
+
+        plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0,)
+        fig, axs = plt.subplots(nrows=1, ncols=NUM_IMS)
+        for i in range(NUM_IMS):
+            ax: Axes = axs[i]
+            ax.set_aspect("equal")
+
+            im = normalize_im(einops.rearrange(pixel_values[i], "c h w -> h w c"))
+            ax.imshow(im.numpy(force=True), extent=(-1.0, 1.0, 1.0, -1.0))
+            for j in range(bsz[1]):
+                ax.scatter(
+                    *((sample_grid[i, j, 0, 0] + sample_grid[i, j, -1, -1]) / 2).numpy(force=True),
+                    color="black", s=16,
+                )
+                ax.plot(*zip(
+                    sample_grid[i, j, 0, 0].numpy(force=True),
+                    sample_grid[i, j, 0, -1].numpy(force=True),
+                    sample_grid[i, j, -1, -1].numpy(force=True),
+                    sample_grid[i, j, -1, 0].numpy(force=True),
+                    sample_grid[i, j, 0, 0].numpy(force=True),
+                ), linewidth=1.0, linestyle="--", color="black")
+
+            ax.set_title(f"Image {i}")
+        fig.suptitle("Original images")
+        plt.show()
+
+        plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0 * bsz[1],)
+        fig, axs = plt.subplots(nrows=bsz[1], ncols=NUM_IMS)
+        for i in range(NUM_IMS):
+            for j in range(bsz[1]):
+                ax: Axes = axs[j, i] if bsz[1] > 1 else axs[i]
+                ax.set_aspect("equal")
+
+                sub_im = normalize_im(einops.rearrange(sample_patches[i, j], "c h w -> h w c"))
+                ax.imshow(sub_im.numpy(force=True))
+
+        fig.suptitle("Sampled patches")
+        plt.show()
+
+        plt.rcdefaults()
+        
 
     def forward(
         self,
@@ -176,7 +234,7 @@ class PredictiveViTPatchEmbeddings(nn.Module):
         patch_config: torch.Tensor,     # float: [B... x N x ?]
     ) -> torch.Tensor:                  # float: [B... x D]
         bsz = patch_config.shape[:-1]
-        num_channels, height, width = pixel_values.shape[-3:]
+        num_channels = pixel_values.shape[-3]
         if num_channels != self.num_channels:
             raise ValueError(
                 "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
@@ -210,50 +268,54 @@ class PredictiveViTPatchEmbeddings(nn.Module):
         sample_grid = self.grid @ affine_transform[..., None, :, :]     # float: [B... x N x P x P x 2]
         sample_patches = torch.vmap(torch.nn.functional.grid_sample, in_dims=(None, 1), out_dims=(1,))(
             pixel_values, sample_grid,
-            mode="bicubic", padding_mode="zeros",
-        )                                                   # float: [B... x N x C x P x P]
+            mode="bicubic", padding_mode="zeros", align_corners=True,
+        )                                                               # float: [B... x N x C x P x P]
         embeddings = torch.vmap(self.projection.forward, in_dims=(0,), out_dims=(0,))(sample_patches)   # float: [B... x N x D]
 
         if RUNTIME_MODE == "debug":
             from matplotlib import pyplot as plt
             from matplotlib.axes import Axes
 
+            NUM_IMS = 5
             def normalize_im(im: torch.Tensor) -> torch.Tensor:
                 min_rgb = torch.min(im.flatten(0, -2), dim=0).values
                 max_rgb = torch.max(im.flatten(0, -2), dim=0).values
                 return (im - min_rgb) / (max_rgb - min_rgb)
 
-            plt.rcParams["figure.figsize"] = (4.0 * bsz[0], 4.0,)
-            fig, axs = plt.subplots(nrows=1, ncols=bsz[0])
-            for i in range(bsz[0]):
-                ax: Axes = axs[i] if bsz[0] > 1 else axs
+            plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0,)
+            fig, axs = plt.subplots(nrows=1, ncols=NUM_IMS)
+            for i in range(NUM_IMS):
+                ax: Axes = axs[i]
                 ax.set_aspect("equal")
 
                 im = normalize_im(einops.rearrange(pixel_values[i], "c h w -> h w c"))
-                ax.imshow(im, extent=(-1.0, 1.0, 1.0, -1.0))
+                ax.imshow(im.numpy(force=True), extent=(-1.0, 1.0, 1.0, -1.0))
                 for j in range(bsz[1]):
-                    ax.scatter(*((sample_grid[i, j, 0, 0] + sample_grid[i, j, -1, -1]) / 2), color="black", s=16)
+                    ax.scatter(
+                        *((sample_grid[i, j, 0, 0] + sample_grid[i, j, -1, -1]) / 2).numpy(force=True),
+                        color="black", s=16,
+                    )
                     ax.plot(*zip(
-                        sample_grid[i, j, 0, 0],
-                        sample_grid[i, j, 0, -1],
-                        sample_grid[i, j, -1, -1],
-                        sample_grid[i, j, -1, 0],
-                        sample_grid[i, j, 0, 0],
+                        sample_grid[i, j, 0, 0].numpy(force=True),
+                        sample_grid[i, j, 0, -1].numpy(force=True),
+                        sample_grid[i, j, -1, -1].numpy(force=True),
+                        sample_grid[i, j, -1, 0].numpy(force=True),
+                        sample_grid[i, j, 0, 0].numpy(force=True),
                     ), linewidth=1.0, linestyle="--", color="black")
 
                 ax.set_title(f"Image {i}")
             fig.suptitle("Original images")
             plt.show()
 
-            plt.rcParams["figure.figsize"] = (4.0 * bsz[0], 4.0 * bsz[1],)
-            fig, axs = plt.subplots(nrows=bsz[1], ncols=bsz[0])
-            for i in range(bsz[0]):
+            plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0 * bsz[1],)
+            fig, axs = plt.subplots(nrows=bsz[1], ncols=NUM_IMS)
+            for i in range(NUM_IMS):
                 for j in range(bsz[1]):
-                    ax: Axes = axs[j, i] if bsz[0] > 1 else axs[j]
+                    ax: Axes = axs[j, i] if bsz[1] > 1 else axs[i]
                     ax.set_aspect("equal")
 
                     sub_im = normalize_im(einops.rearrange(sample_patches[i, j], "c h w -> h w c"))
-                    ax.imshow(sub_im)
+                    ax.imshow(sub_im.numpy(force=True))
 
             fig.suptitle("Sampled patches")
             plt.show()
@@ -261,6 +323,10 @@ class PredictiveViTPatchEmbeddings(nn.Module):
             plt.rcdefaults()
 
         return embeddings
+
+
+
+
 
 
 
@@ -589,6 +655,38 @@ class PredictiveViTEncoder(nn.Module):
 
 
 
+@dataclass
+class BaseModelOutputWithInputs(ModelOutput):
+    """
+    Base class for model's outputs that also contains a pooling of the last hidden states.
+
+    Args:
+        context_lengthss (`torch.LongTensor` of shape `(batch_size)`):
+            Number of context tokens used for prediction for each image in the batchs
+        input_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Sequence of hidden-states at the input of the first layer of the model.
+        last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Sequence of hidden-states at the output of the last layer of the model.
+        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
+            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
+        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
+            heads.
+        
+    """
+
+    input_position: torch.FloatTensor = None
+    input_hidden_state: torch.FloatTensor = None
+    context_lengths: torch.LongTensor = None
+    last_hidden_state: torch.FloatTensor = None
+    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 
 
@@ -680,7 +778,7 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
         self.embeddings = PredictiveViTEmbeddings(config)
         self.encoder = PredictiveViTEncoder(config)
 
-        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        # self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         # self.pooler = ViTPooler(config) if add_pooling_layer else None
 
         # Initialize weights and apply final processing
@@ -713,7 +811,7 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
     @add_start_docstrings_to_model_forward(VIT_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
-        output_type=BaseModelOutputWithPooling,
+        output_type=BaseModelOutputWithInputs,
         config_class=_CONFIG_FOR_DOC,
         modality="vision",
         expected_output=_EXPECTED_OUTPUT_SHAPE,
@@ -721,10 +819,11 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
     def forward(
         self,
         pixel_values: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
+        output_inputs: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPooling]:
+    ) -> Union[Tuple, BaseModelOutputWithInputs]:
         r"""
         bool_masked_pos (`torch.BoolTensor` of shape `(batch_size, num_patches)`, *optional*):
             Boolean masked positions. Indicates which patches are masked (1) and which aren't (0).
@@ -745,35 +844,39 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
 
         bsz = pixel_values.shape[:-3]                                                                           # int: B...
         # context_lengths = torch.poisson(torch.ones(bsz)).to(torch.int)                                          # int: [B...]
-        context_lengths = torch.empty(bsz).geometric_(1 / self.config.expected_context_length).to(torch.int)    # int: [B...]
+        context_lengths = torch.empty(bsz).geometric_(1 / self.config.expected_context_length).to(torch.int64)  # int: [B...]
         max_context_length = torch.max(context_lengths).item()                                                  # int: max_N
 
         sample_config = self.embeddings.sample_initial(bsz + (max_context_length,))     # float: [B... x max_N x ?]
-        embedding_output = self.embeddings(pixel_values, sample_config)                 # float: [B... x max_N x D]
+        embedding_output = self.embeddings(pixel_values, sample_config)                 # float: [B... x (max_N + 2) x D]
 
-        k_idx = torch.arange(max_context_length + 2)
-        attention_mask = (k_idx <= context_lengths[..., None]) | (k_idx == max_context_length + 1)  # bool: [B... x (max_N + 2)]
+        k_idx = torch.arange(embedding_output.shape[-2])
+        attention_mask = (k_idx <= context_lengths[..., None]) | (k_idx == max_context_length + 1)  # bool: [B... x (max_N + ?)]
+        if not self.config.use_cls_token:
+            attention_mask[..., 0] = False
 
-        encoder_outputs = self.encoder.forward(
+        encoder_outputs: BaseModelOutput = self.encoder(
             embedding_output,
             attention_mask=attention_mask[..., None, :],
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        encoder_inputs = embedding_output if output_inputs else None
 
         sequence_output = encoder_outputs[0]
-        sequence_output = self.layernorm(sequence_output)
+        # sequence_output = self.layernorm(sequence_output)
         # pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
         if not return_dict:
             head_outputs = (sequence_output,)
             # head_outputs = (sequence_output, pooled_output) if pooled_output is not None else (sequence_output,)
             return head_outputs + encoder_outputs[1:]
-
-        return BaseModelOutputWithPooling(
+        return BaseModelOutputWithInputs(
+            input_position=sample_config,
+            input_hidden_state=encoder_inputs,
+            context_lengths=context_lengths,
             last_hidden_state=sequence_output,
-            # pooler_output=pooled_output,
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
         )
