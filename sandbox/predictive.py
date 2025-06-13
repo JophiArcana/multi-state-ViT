@@ -21,22 +21,22 @@ if __name__ == "__main__":
     # print(f"Seed: {torch.seed()}")
     torch.set_printoptions(precision=3, sci_mode=False, linewidth=400)
 
-    dataset_name, n_classes = DATASETS["Common"][1]
     base_model_name = "facebook/dino-vitb8"
 
-    # SECTION: Dataset setup
-    dataset = datasets.load_dataset(dataset_name)
-    dataset_size = dataset["train"].num_rows
-
-    images = []
-    subsample_size = 5
-    while len(images) < subsample_size:
-        images.append(dataset["train"][torch.randint(0, dataset_size, ()).item()]["image"])
-
-    def process_grayscale(im):
-        arr = np.array(im)
-        return arr if arr.ndim >= 3 else np.tile(arr[..., None], (1, 1, 3))
-    images = [*map(process_grayscale, images)]
+    # # SECTION: Dataset setup
+    # dataset_name, n_classes = DATASETS["Common"][1]
+    # dataset = datasets.load_dataset(dataset_name)
+    # dataset_size = dataset["train"].num_rows
+    #
+    # images = []
+    # subsample_size = 5
+    # while len(images) < subsample_size:
+    #     images.append(dataset["train"][torch.randint(0, dataset_size, ()).item()]["image"])
+    #
+    # def process_grayscale(im):
+    #     arr = np.array(im)
+    #     return arr if arr.ndim >= 3 else np.tile(arr[..., None], (1, 1, 3))
+    # images = [*map(process_grayscale, images)]
 
     # SECTION: Configure model
     from transformers import ViTModel, ViTImageProcessor
@@ -54,10 +54,10 @@ if __name__ == "__main__":
     image_processor.__dict__.update({
         "size": {"height": image_size, "width": image_size},
     })
-    inputs = image_processor(images=images, return_tensors="pt")["pixel_values"].to(DEVICE)
+    # inputs = image_processor(images=images, return_tensors="pt")["pixel_values"].to(DEVICE)
 
     model = PredictiveViTModel(PredictiveViTConfig(
-        _attn_implementation="eager",
+        _attn_implementation="sdpa",
         patch_config_scale=[
             [0.7, 0.0],
             [0.7, 0.0],
@@ -76,7 +76,7 @@ if __name__ == "__main__":
     #     positional_recovery=1.0,
     #     positional_regularization=1.0,
     # )
-
+    #
     # with torch.no_grad():
     #     model.eval()
     #     output = model.forward(
@@ -89,31 +89,73 @@ if __name__ == "__main__":
     #     combined_loss, losses, meta = training_loss(inputs, model, output, training_config)
     #     print(meta["predicted_context_position"])
     #     print(meta["predicted_query_position"])
+    #     model.visualize_sample(
+    #         pixel_values=inputs,
+    #         context_lengths=output.context_lengths,
+    #         sample_config=output.input_position,
+    #         predicted_sample_config=torch.cat((
+    #             meta["predicted_context_position"],
+    #             meta["predicted_query_position"][..., None, :],
+    #         ), dim=-2),
+    #         context_prediction=True,
+    #         query_prediction=True,
+    #     )
     #     raise Exception()
         
     # SECTION: Set up dataset
     from torch.utils.data import DataLoader
-    ds = datasets.load_dataset("ILSVRC/imagenet-1k", split="train")
-    
+    ds = datasets.load_dataset("ILSVRC/imagenet-1k", split="train", trust_remote_code=True)
+
     def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         images, labels = zip(*map(dict.values, batch))
         return {
             "image": image_processor(images=images, return_tensors="pt")["pixel_values"].to(DEVICE),
             "label": torch.tensor(labels)
         }
-    
+
     dl = DataLoader(ds, batch_size=64, shuffle=True, collate_fn=collate_fn, generator=torch.Generator(device=DEVICE))
-    
+
     # SECTION: Configure training
     training_config = PredictiveViTTrainingConfig(
         preservation=0.8,
         context_prediction=0.5,
         query_prediction=1.0,
         positional_recovery=0.0,
-        positional_regularization=0.1,
+        positional_regularization=1.0,
     )
-    
+
+    model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-9)
+    for it, batch in enumerate(dl):
+        output = model(
+            pixel_values=batch["image"],
+            output_inputs=True,
+            output_hidden_states=False,
+            output_attentions=False,
+            return_dict=True,
+        )
+        loss, losses, meta = training_loss(batch["image"], model, output, training_config)
+
+        print("=" * 120)
+        print(f"Iteration {it}")
+        model.visualize_sample(
+            pixel_values=batch["image"],
+            context_lengths=output.context_lengths,
+            sample_config=output.input_position,
+            predicted_sample_config=torch.cat((
+                meta["predicted_context_position"],
+                meta["predicted_query_position"][..., None, :],
+            ), dim=-2),
+            context_prediction=True,
+            query_prediction=True,
+        )
+        print()
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        raise Exception()
     
 
 

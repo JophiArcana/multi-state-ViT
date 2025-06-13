@@ -3,7 +3,7 @@ import sys
 import torch
 
 
-DEVICE: str = "cuda:0"
+DEVICE: str = "cpu"
 DTYPE: torch.dtype = torch.float32
 RUNTIME_MODE: str = "debug"
 PROJECT_NAME: str = "multi-state-ViT"

@@ -16,7 +16,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import einops
 import torch
@@ -45,6 +45,7 @@ from transformers.utils import (
 )
 
 from model.predictive_encoder.configuration_spvit import PredictiveViTConfig
+from infrastructure import utils
 from infrastructure.settings import RUNTIME_MODE
 
 
@@ -172,79 +173,12 @@ class PredictiveViTPatchEmbeddings(nn.Module):
             nn.Flatten(start_dim=-3, end_dim=-1),
         )
 
-    def visualize_sample(
-        self,
-        pixel_values: torch.Tensor,     # float: [B... x C x H x W]
-        patch_config: torch.Tensor,     # float: [B... x N x ?]
-        NUM_IMS: int = 5,
-    ) -> None:
-        from matplotlib import pyplot as plt
-        from matplotlib.axes import Axes
-
-        bsz = pixel_values.shape[:-3]
-        def normalize_im(im: torch.Tensor) -> torch.Tensor:
-            min_rgb = torch.min(im.flatten(0, -2), dim=0).values
-            max_rgb = torch.max(im.flatten(0, -2), dim=0).values
-            return (im - min_rgb) / (max_rgb - min_rgb)
-
-        plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0,)
-        fig, axs = plt.subplots(nrows=1, ncols=NUM_IMS)
-        for i in range(NUM_IMS):
-            ax: Axes = axs[i]
-            ax.set_aspect("equal")
-
-            im = normalize_im(einops.rearrange(pixel_values[i], "c h w -> h w c"))
-            ax.imshow(im.numpy(force=True), extent=(-1.0, 1.0, 1.0, -1.0))
-            for j in range(bsz[1]):
-                ax.scatter(
-                    *((sample_grid[i, j, 0, 0] + sample_grid[i, j, -1, -1]) / 2).numpy(force=True),
-                    color="black", s=16,
-                )
-                ax.plot(*zip(
-                    sample_grid[i, j, 0, 0].numpy(force=True),
-                    sample_grid[i, j, 0, -1].numpy(force=True),
-                    sample_grid[i, j, -1, -1].numpy(force=True),
-                    sample_grid[i, j, -1, 0].numpy(force=True),
-                    sample_grid[i, j, 0, 0].numpy(force=True),
-                ), linewidth=1.0, linestyle="--", color="black")
-
-            ax.set_title(f"Image {i}")
-        fig.suptitle("Original images")
-        plt.show()
-
-        plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0 * bsz[1],)
-        fig, axs = plt.subplots(nrows=bsz[1], ncols=NUM_IMS)
-        for i in range(NUM_IMS):
-            for j in range(bsz[1]):
-                ax: Axes = axs[j, i] if bsz[1] > 1 else axs[i]
-                ax.set_aspect("equal")
-
-                sub_im = normalize_im(einops.rearrange(sample_patches[i, j], "c h w -> h w c"))
-                ax.imshow(sub_im.numpy(force=True))
-
-        fig.suptitle("Sampled patches")
-        plt.show()
-
-        plt.rcdefaults()
-        
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,     # float: [B... x C x H x W]
-        patch_config: torch.Tensor,     # float: [B... x N x ?]
-    ) -> torch.Tensor:                  # float: [B... x D]
+    def grid_sample_points(self, patch_config: torch.Tensor, bbox_only: bool = False) -> torch.Tensor:
         bsz = patch_config.shape[:-1]
-        num_channels = pixel_values.shape[-3]
-        if num_channels != self.num_channels:
-            raise ValueError(
-                "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
-                f" Expected {self.num_channels} but got {num_channels}."
-            )
-
         t = patch_config[..., None, :2]                                 # float: [B... x N x 1 x 2]
         match self.patch_config:
             case "translation":
-                I = torch.eye(2).expand(bsz + (2, 2,))      # float: [B... x N x 2 x 2]
+                I = torch.eye(2).expand(bsz + (2, 2,))                  # float: [B... x N x 2 x 2]
                 affine_transform = torch.cat((I, t), dim=-2)            # float: [B... x N x 3 x 2]
 
             case "scaling":
@@ -265,64 +199,90 @@ class PredictiveViTPatchEmbeddings(nn.Module):
             case _:
                 raise ValueError(self.patch_config)
 
-        sample_grid = self.grid @ affine_transform[..., None, :, :]     # float: [B... x N x P x P x 2]
+        if bbox_only:
+            return torch.tensor([
+                [[-1.0, -1.0, 1], [1.0, -1.0, 1],],
+                [[-1.0, 1.0, 1], [1.0, 1.0, 1,]],
+            ]) @ affine_transform[..., None, :, :]                  # float: [B... x N x P x P x 2]
+        else:
+            return self.grid @ affine_transform[..., None, :, :]    # float: [B... x N x P x P x 2]
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,     # float: [B... x C x H x W]
+        patch_config: torch.Tensor,     # float: [B... x N x ?]
+    ) -> torch.Tensor:                  # float: [B... x D]
+        num_channels = pixel_values.shape[-3]
+        if num_channels != self.num_channels:
+            raise ValueError(
+                "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
+                f" Expected {self.num_channels} but got {num_channels}."
+            )
+
+        sample_grid = self.grid_sample_points(patch_config, bbox_only=False)    # float: [B... x N x P x P x 2]
         sample_patches = torch.vmap(torch.nn.functional.grid_sample, in_dims=(None, 1), out_dims=(1,))(
             pixel_values, sample_grid,
             mode="bicubic", padding_mode="zeros", align_corners=True,
-        )                                                               # float: [B... x N x C x P x P]
+        )                                                                       # float: [B... x N x C x P x P]
         embeddings = torch.vmap(self.projection.forward, in_dims=(0,), out_dims=(0,))(sample_patches)   # float: [B... x N x D]
 
-        if RUNTIME_MODE == "debug":
-            from matplotlib import pyplot as plt
-            from matplotlib.axes import Axes
-
-            NUM_IMS = 5
-            def normalize_im(im: torch.Tensor) -> torch.Tensor:
-                min_rgb = torch.min(im.flatten(0, -2), dim=0).values
-                max_rgb = torch.max(im.flatten(0, -2), dim=0).values
-                return (im - min_rgb) / (max_rgb - min_rgb)
-
-            plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0,)
-            fig, axs = plt.subplots(nrows=1, ncols=NUM_IMS)
-            for i in range(NUM_IMS):
-                ax: Axes = axs[i]
-                ax.set_aspect("equal")
-
-                im = normalize_im(einops.rearrange(pixel_values[i], "c h w -> h w c"))
-                ax.imshow(im.numpy(force=True), extent=(-1.0, 1.0, 1.0, -1.0))
-                for j in range(bsz[1]):
-                    ax.scatter(
-                        *((sample_grid[i, j, 0, 0] + sample_grid[i, j, -1, -1]) / 2).numpy(force=True),
-                        color="black", s=16,
-                    )
-                    ax.plot(*zip(
-                        sample_grid[i, j, 0, 0].numpy(force=True),
-                        sample_grid[i, j, 0, -1].numpy(force=True),
-                        sample_grid[i, j, -1, -1].numpy(force=True),
-                        sample_grid[i, j, -1, 0].numpy(force=True),
-                        sample_grid[i, j, 0, 0].numpy(force=True),
-                    ), linewidth=1.0, linestyle="--", color="black")
-
-                ax.set_title(f"Image {i}")
-            fig.suptitle("Original images")
-            plt.show()
-
-            plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0 * bsz[1],)
-            fig, axs = plt.subplots(nrows=bsz[1], ncols=NUM_IMS)
-            for i in range(NUM_IMS):
-                for j in range(bsz[1]):
-                    ax: Axes = axs[j, i] if bsz[1] > 1 else axs[i]
-                    ax.set_aspect("equal")
-
-                    sub_im = normalize_im(einops.rearrange(sample_patches[i, j], "c h w -> h w c"))
-                    ax.imshow(sub_im.numpy(force=True))
-
-            fig.suptitle("Sampled patches")
-            plt.show()
-
-            plt.rcdefaults()
+        # if RUNTIME_MODE == "debug":
+        #     self.visualize_sample(pixel_values, sample_grid)
+        #     # from matplotlib import pyplot as plt
+        #     # from matplotlib.axes import Axes
+        #     #
+        #     # NUM_IMS = 5
+        #     # def normalize_im(im: torch.Tensor) -> torch.Tensor:
+        #     #     min_rgb = torch.min(im.flatten(0, -2), dim=0).values
+        #     #     max_rgb = torch.max(im.flatten(0, -2), dim=0).values
+        #     #     return (im - min_rgb) / (max_rgb - min_rgb)
+        #     #
+        #     # plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0,)
+        #     # fig, axs = plt.subplots(nrows=1, ncols=NUM_IMS)
+        #     # for i in range(NUM_IMS):
+        #     #     ax: Axes = axs[i]
+        #     #     ax.set_aspect("equal")
+        #     #
+        #     #     im = normalize_im(einops.rearrange(pixel_values[i], "c h w -> h w c"))
+        #     #     ax.imshow(im.numpy(force=True), extent=(-1.0, 1.0, 1.0, -1.0))
+        #     #     for j in range(bsz[1]):
+        #     #         ax.scatter(
+        #     #             *((sample_grid[i, j, 0, 0] + sample_grid[i, j, -1, -1]) / 2).numpy(force=True),
+        #     #             color="black", s=16,
+        #     #         )
+        #     #         ax.plot(*zip(
+        #     #             sample_grid[i, j, 0, 0].numpy(force=True),
+        #     #             sample_grid[i, j, 0, -1].numpy(force=True),
+        #     #             sample_grid[i, j, -1, -1].numpy(force=True),
+        #     #             sample_grid[i, j, -1, 0].numpy(force=True),
+        #     #             sample_grid[i, j, 0, 0].numpy(force=True),
+        #     #         ), linewidth=1.0, linestyle="--", color="black")
+        #     #
+        #     #     ax.set_title(f"Image {i}")
+        #     # fig.suptitle("Original images")
+        #     # plt.show()
+        #     #
+        #     # plt.rcParams["figure.figsize"] = (4.0 * NUM_IMS, 4.0 * bsz[1],)
+        #     # fig, axs = plt.subplots(nrows=bsz[1], ncols=NUM_IMS)
+        #     # for i in range(NUM_IMS):
+        #     #     for j in range(bsz[1]):
+        #     #         ax: Axes = axs[j, i] if bsz[1] > 1 else axs[i]
+        #     #         ax.set_aspect("equal")
+        #     #
+        #     #         sub_im = normalize_im(einops.rearrange(sample_patches[i, j], "c h w -> h w c"))
+        #     #         ax.imshow(sub_im.numpy(force=True))
+        #     #
+        #     # fig.suptitle("Sampled patches")
+        #     # plt.show()
+        #     #
+        #     # plt.rcdefaults()
 
         return embeddings
+
+
+
+
+
 
 
 
@@ -661,7 +621,7 @@ class BaseModelOutputWithInputs(ModelOutput):
     Base class for model's outputs that also contains a pooling of the last hidden states.
 
     Args:
-        context_lengthss (`torch.LongTensor` of shape `(batch_size)`):
+        context_lengths (`torch.LongTensor` of shape `(batch_size)`):
             Number of context tokens used for prediction for each image in the batchs
         input_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
             Sequence of hidden-states at the input of the first layer of the model.
@@ -687,7 +647,6 @@ class BaseModelOutputWithInputs(ModelOutput):
     last_hidden_state: torch.FloatTensor = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
-
 
 
 class PredictiveViTPreTrainedModel(PreTrainedModel):
@@ -807,6 +766,85 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
         """
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
+
+    def visualize_sample(
+        self,
+        pixel_values: torch.Tensor,                             # float: [B... x C x H x W]
+        context_lengths: torch.Tensor,                          # int: [B...]
+        sample_config: torch.Tensor,                            # float: [B... x N x ?]
+        predicted_sample_config: Optional[torch.Tensor] = None, # float: [B... x (N + 1) x ?]
+        context_prediction: bool = False,
+        query_prediction: bool = False,
+        num_ims: int = 3,
+    ) -> None:
+        from matplotlib import pyplot as plt
+        from matplotlib.axes import Axes
+
+        def normalize_im(im: torch.Tensor) -> torch.Tensor:
+            min_rgb = torch.min(im.flatten(0, -2), dim=0).values
+            max_rgb = torch.max(im.flatten(0, -2), dim=0).values
+            return (im - min_rgb) / (max_rgb - min_rgb)
+
+        def grid_center(grid: torch.Tensor) -> torch.Tensor:
+            return (grid[0, 0] + grid[-1, -1]) / 2
+
+        def plot_bbox(ax: Axes, grid: torch.Tensor, center: bool = False, **kwargs: Any) -> None:
+            if center:
+                utils.call_func_with_kwargs(ax.scatter, args=(*grid_center(grid).numpy(force=True),), kwargs=kwargs)
+            utils.call_func_with_kwargs(ax.plot, args=(*zip(
+                grid[0, 0].numpy(force=True),
+                grid[0, -1].numpy(force=True),
+                grid[-1, -1].numpy(force=True),
+                grid[-1, 0].numpy(force=True),
+                grid[0, 0].numpy(force=True),
+            ),), kwargs=kwargs)
+
+        sample_grid = self.embeddings.patch_embeddings.grid_sample_points(sample_config, bbox_only=True)
+        predicted_sample_grid = self.embeddings.patch_embeddings.grid_sample_points(predicted_sample_config, bbox_only=True)
+
+        plt.rcParams["figure.figsize"] = (4.0 * num_ims, 4.0,)
+        fig, axs = plt.subplots(nrows=1, ncols=num_ims,)
+        for i in range(num_ims):
+            ax: Axes = axs[i]
+            ax.set_aspect("equal")
+
+            im = normalize_im(einops.rearrange(pixel_values[i], "c h w -> h w c"))
+            ax.imshow(im.numpy(force=True), extent=(-1.0, 1.0, 1.0, -1.0))
+
+            bbox_kwargs = {"s": 32, "linewidth": 1.0, "linestyle": "--",}
+            for j in range(context_lengths[i]):
+                plot_bbox(ax, sample_grid[i, j], center=True, color="black", **bbox_kwargs,)
+
+                if predicted_sample_grid is not None and context_prediction:
+                    plot_bbox(ax, predicted_sample_grid[i, j], center=False, color="purple", **bbox_kwargs,)
+                    ax.arrow(
+                        *grid_center(sample_grid[i, j]),
+                        *(grid_center(predicted_sample_grid[i, j]) - grid_center(sample_grid[i, j])),
+                        color="purple", width=0.005, head_width=0.1, length_includes_head=True,
+                    )
+
+            if predicted_sample_grid is not None and query_prediction:
+                plot_bbox(ax, predicted_sample_grid[i, -1], color="red", **bbox_kwargs,)
+
+            ax.set_title(f"Image {i}")
+
+        fig.suptitle("Original images")
+        plt.show()
+
+        # plt.rcParams["figure.figsize"] = (4.0 * num_ims, 4.0 * bsz[1],)
+        # fig, axs = plt.subplots(nrows=bsz[1], ncols=num_ims)
+        # for i in range(num_ims):
+        #     for j in range(bsz[1]):
+        #         ax: Axes = axs[j, i] if bsz[1] > 1 else axs[i]
+        #         ax.set_aspect("equal")
+        #
+        #         sub_im = normalize_im(einops.rearrange(sample_patches[i, j], "c h w -> h w c"))
+        #         ax.imshow(sub_im.numpy(force=True))
+        #
+        # fig.suptitle("Sampled patches")
+        # plt.show()
+
+        plt.rcdefaults()
 
     @add_start_docstrings_to_model_forward(VIT_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
