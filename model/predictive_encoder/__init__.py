@@ -1,5 +1,5 @@
 from .configuration_spvit import PredictiveViTConfig
 from .configuration_training import PredictiveViTTrainingConfig
-from .modeling_spvitencoder import PredictiveViTModel
+from .modeling_spvitencoder import BaseModelOutputWithInputs, PredictiveViTModel
 from .modeling_training import training_loss
 

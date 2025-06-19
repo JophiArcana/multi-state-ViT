@@ -51,5 +51,7 @@ class PredictiveViTTrainingConfig:
     preservation: float = 0.0
     context_prediction: float = 0.0
     query_prediction: float = 0.0
+    context_patch_prediction: float = 0.0
+    query_patch_prediction: float = 0.0
     positional_recovery: float = 0.0
     positional_regularization: float = 0.0

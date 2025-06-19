@@ -5,6 +5,7 @@ import json
 import math
 import os
 import sys
+import time
 from argparse import Namespace
 from collections import OrderedDict
 from matplotlib import transforms
@@ -174,6 +175,10 @@ def complex(t: torch.Tensor | TensorDict[str, torch.Tensor]) -> Union[torch.Tens
 
 def ceildiv(a: int, b: int) -> int:
     return -(-a // b)
+
+
+def prod(a: Union[int, float]) -> Union[int, float]:
+    return np.prod(a).item()
 
 
 def multiclass_logits(t: torch.Tensor) -> torch.Tensor:
@@ -389,6 +394,17 @@ class print_disabled:
     def __exit__(self, exc_type, exc_val, exc_tb):
         sys.stdout.close()
         sys.stdout = self._original_stdout
+
+
+class Timer:
+    def __init__(self):
+        self.start = time.perf_counter()
+        
+    def stop(self):
+        stop = time.perf_counter()
+        result = stop - self.start
+        self.start = stop
+        return result
 
 
 def flatten_nested_dict(d: Dict[str, Any]) -> Dict[str, Any]:
