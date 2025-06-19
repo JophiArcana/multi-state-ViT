@@ -1,0 +1,37 @@
+numpy==1.26.4
+matplotlib==3.9.2
+ipython==8.25.0
+torch # ~=2.5.1
+tensordict # ==0.5.0
+jupyter==1.0.0
+attrs~=23.1.0
+wheel~=0.41.2
+tornado~=6.3.3
+jinja2~=3.1.2
+setuptools~=68.0.0
+packaging~=23.1
+pyparsing~=3.0.9
+typing_extensions # ~=4.8.0
+panel~=1.2.3
+pathlib~=1.0.1
+docutils # ~=0.18.1
+sphinx~=5.0.2
+keyring~=23.13.1
+zipp~=3.11.0
+future~=0.18.3
+transformers~=4.46.2
+huggingface_hub==0.23.4
+control~=0.9.4
+dimarray~=1.2.1
+netcdf4 # ==1.7.1s
+ncut-pytorch==1.7.9
+pillow==10.4.0
+scikit-learn~=1.6.1
+requests~=2.32.3
+datasets~=3.0.1
+cuml~=24.10.00
+
+
+
+
+
