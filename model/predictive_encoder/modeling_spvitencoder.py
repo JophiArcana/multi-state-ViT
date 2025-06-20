@@ -236,6 +236,38 @@ class PredictiveViTPatchEmbeddings(nn.Module):
         
         return embd
 
+    def grid_sample_points(self, patch_config: torch.Tensor, bbox_only: bool = False) -> torch.Tensor:
+        bsz = patch_config.shape[:-1]
+        t = patch_config[..., None, :2]                                 # float: [B... x N x 1 x 2]
+        match self.patch_config:
+            case "translation":
+                I = torch.eye(2).expand(bsz + (2, 2,))                  # float: [B... x N x 2 x 2]
+                D = I * self.default_patch_scale
+
+            case "scaling":
+                I = torch.eye(2).expand(bsz + (2, 2,))                  # float: [B... x N x 2 x 2]
+                D = I * torch.exp(patch_config[..., 2, None, None])
+
+            # case "similarity":
+            #     t = patch_config[..., :2]                               # float: [B... x 2]
+            #     u = patch_config[..., 2:]                               # float: [B... x 2]
+            #     v = torch.stack((-u[..., 1], u[..., 0]), dim=-1)        # float: [B... x 2]
+            #     affine_transform = torch.stack((u, v, t), dim=-2)       # float: [B... x 3 x 2]
+
+            case "non_uniform_scaling":
+                D = torch.diag_embed(torch.exp(torch.clamp_max(patch_config[..., 2:4], 0.0)))   # float: [B... x N x 2 x 2]
+            case _:
+                raise ValueError(self.patch_config)
+
+        affine_transform = torch.cat((D, t), dim=-2)            # float: [B... x N x 3 x 2]
+        if bbox_only:
+            return torch.tensor([
+                [[-1.0, -1.0, 1], [1.0, -1.0, 1],],
+                [[-1.0, 1.0, 1], [1.0, 1.0, 1,]],
+            ]) @ affine_transform[..., None, :, :]                  # float: [B... x N x P x P x 2]
+        else:
+            return self.grid @ affine_transform[..., None, :, :]    # float: [B... x N x P x P x 2]
+
     def position_to_patch(
         self,
         pixel_values: torch.Tensor,     # float: [B... x C x H x W]
