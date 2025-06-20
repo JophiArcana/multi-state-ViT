@@ -87,9 +87,9 @@ def prediction_error(
     model: PredictiveViTModel,
     predicted_state: torch.Tensor,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    position_config = model.embeddings.position_decoder(predicted_state, return_orthogonal=False)   # float: [B... x N x ?]
-    true_state = model.embeddings(pixel_values, position_config)[..., 1:-1, :]  # float: [B... x N x D]
-    error = torch.norm(predicted_state - true_state, p="fro", dim=-1) ** 2      # float: [B... x N]
+    position_config = model.embeddings.latent_to_position(predicted_state, False)[0]    # float: [B... x N x ?]
+    true_state = model.embeddings(pixel_values, position_config)[..., 1:-1, :]      # float: [B... x N x D]
+    error = torch.norm(predicted_state - true_state, p="fro", dim=-1) ** 2          # float: [B... x N]
     
     return error, {
         "config": position_config,
@@ -102,8 +102,8 @@ def context_prediction_loss(
     model: PredictiveViTModel,
     output: BaseModelOutputWithInputs,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    predicted_context_state = output.last_hidden_state[..., 1:-1, :]                                        # float: [B... x max_N x D]
-    error, meta = prediction_error(pixel_values, model, predicted_context_state,)    # float: [B... x max_N x ?], [B... x max_N]
+    predicted_context_state = output.last_hidden_state[..., 1:-1, :]                # float: [B... x max_N x D]
+    error, meta = prediction_error(pixel_values, model, predicted_context_state,)   # float: [B... x max_N x ?], [B... x max_N]
     error = sum_error_with_context_lengths(error, output.context_lengths,) / model.config.expected_context_length
      
     return error, {
@@ -117,8 +117,8 @@ def query_prediction_loss(
     model: PredictiveViTModel,
     output: BaseModelOutputWithInputs,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    predicted_query_state = output.last_hidden_state[..., -1:, :]                                       # float: [B... x 1 x D]
-    error, meta = prediction_error(pixel_values, model, predicted_query_state,)  # float: [B... x 1 x ?], [B... x 1]
+    predicted_query_state = output.last_hidden_state[..., -1:, :]                   # float: [B... x 1 x D]
+    error, meta = prediction_error(pixel_values, model, predicted_query_state,)     # float: [B... x 1 x ?], [B... x 1]
 
     return error[..., 0], {
         "predicted_query_position": meta["config"][..., 0, :],
@@ -132,12 +132,12 @@ def patch_prediction_error(
     model: PredictiveViTModel,
     predicted_state: torch.Tensor,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    position_config, orthogonal_state = model.embeddings.position_decoder(predicted_state, return_orthogonal=True)  # float: [B... x N x ?]
+    position_config, orthogonal_state = model.embeddings.latent_to_position(predicted_state, True)  # float: [B... x N x ?]
     
-    predicted_patch = model.embeddings.patch_embeddings.decode(orthogonal_state)                    # float: [B... x N x C x P x P]
-    true_patch = model.embeddings.patch_embeddings.sample_patches(pixel_values, position_config)    # float: [B... x N x C x P x P]
+    predicted_patch = model.embeddings.patch_embeddings.latent_to_patch(orthogonal_state)           # float: [B... x N x C x P x P]
+    true_patch = model.embeddings.patch_embeddings.position_to_patch(pixel_values, position_config) # float: [B... x N x C x P x P]
     
-    error = torch.norm(torch.flatten(predicted_patch - true_patch, start_dim=-3, end_dim=-1), p="fro", dim=-1) ** 2 # float: [B... x N]
+    error = torch.norm(torch.flatten(predicted_patch - true_patch, start_dim=-3, end_dim=-1), p="fro", dim=-1) ** 2     # float: [B... x N]
     
     return error, {
         "config": position_config,
@@ -183,10 +183,10 @@ def positional_recovery_loss(
     model: PredictiveViTModel,
     output: BaseModelOutputWithInputs,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    predicted_context_state = output.last_hidden_state[..., 1:-1, :]                # float: [B... x max_N x D]
+    predicted_context_state = output.last_hidden_state[..., 1:-1, :]                            # float: [B... x max_N x D]
     
-    input_config = output.input_position                                            # float: [B... x max_N x ?]
-    position_config = model.embeddings.position_decoder(predicted_context_state)    # float: [B... x max_N x ?]
+    input_config = output.input_position                                                        # float: [B... x max_N x ?]
+    position_config = model.embeddings.latent_to_position(predicted_context_state, False)[0]    # float: [B... x max_N x ?]
     
     error = compute_error_with_context_lengths(
         position_config, input_config, output.context_lengths,
@@ -200,8 +200,8 @@ def positional_regularization_loss(
     model: PredictiveViTModel,
     output: BaseModelOutputWithInputs,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    predicted_state = output.last_hidden_state[..., 1:, :]                  # float: [B... x (max_N + 1) x D]
-    position_config = model.embeddings.position_decoder(predicted_state)    # float: [B... x (max_N + 1) x ?]
+    predicted_state = output.last_hidden_state[..., 1:, :]                              # float: [B... x (max_N + 1) x D]
+    position_config = model.embeddings.latent_to_position(predicted_state, False)[0]    # float: [B... x (max_N + 1) x ?]
     
     scale = torch.tensor(model.config.patch_config_scale)
     match scale.ndim:

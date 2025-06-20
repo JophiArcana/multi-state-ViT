@@ -106,12 +106,8 @@ class PredictiveViTConfig(PretrainedConfig):
         encoder_stride: int = 16,
         patch_config: str = "scaling",
         default_patch_scale: float = 0.5,
-        patch_config_distribution: Literal["gaussian", "uniform"] = "uniform",
-        patch_config_scale: float | Sequence[Any] | torch.Tensor = torch.tensor([
-            [0.333, 0.0],
-            [0.333, 0.0],
-            [0.333, -1.0],
-        ]),
+        patch_config_distribution: Literal["uniform", "gaussian", "sigmoid", "cubic"] = "uniform",
+        patch_config_scale: float | Sequence[Any] | torch.Tensor = 1.0,
         pe_bias: bool = False,
         expected_context_length: float = 2.0,
 

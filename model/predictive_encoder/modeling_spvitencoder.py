@@ -76,26 +76,6 @@ PATCH_CONFIG_DOF: Dict[str, int] = {
 }
 
 
-class LinearDecoder(nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
-        nn.Module.__init__(self)
-        self.decoder = nn.Linear(*args, **kwargs)
-    
-    def forward(self, x: torch.Tensor, return_orthogonal: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        W = self.decoder.weight
-        proj = x @ W.mT
-        if self.decoder.bias:
-            y = proj + self.decoder.bias
-        else:
-            y = proj
-        
-        if return_orthogonal:
-            orthogonal_x = x - proj @ torch.linalg.pinv(W).mT
-            return y, orthogonal_x
-        else:
-            return y
-
-
 class PredictiveViTEmbeddings(nn.Module):
     """
     Construct the CLS token, position and patch embeddings. Optionally, also the mask token.
@@ -105,7 +85,7 @@ class PredictiveViTEmbeddings(nn.Module):
         super().__init__()
         self.patch_embeddings = PredictiveViTPatchEmbeddings(config)
         self.position_encoder = nn.Linear(PATCH_CONFIG_DOF[config.patch_config], config.hidden_size, bias=config.pe_bias)
-        self.position_decoder = LinearDecoder(config.hidden_size, PATCH_CONFIG_DOF[config.patch_config], bias=config.pe_bias)
+        self.position_decoder = nn.Linear(config.hidden_size, PATCH_CONFIG_DOF[config.patch_config], bias=config.pe_bias)
 
         self.cls_token = nn.Parameter(torch.randn((config.hidden_size,)), requires_grad=config.use_cls_token)
         self.prd_token = nn.Parameter(torch.randn((config.hidden_size,)), requires_grad=True)
@@ -118,11 +98,14 @@ class PredictiveViTEmbeddings(nn.Module):
         match self.config.patch_config:
             case "translation" | "scaling" | "non-uniform-scaling":
                 match self.config.patch_config_distribution:
-                    case "gaussian":
-                        sample = torch.randn(shape + (PATCH_CONFIG_DOF[self.config.patch_config],))
                     case "uniform":
                         sample = 2 * torch.rand(shape + (PATCH_CONFIG_DOF[self.config.patch_config],)) - 1
-
+                    case "gaussian" | "sigmoid" | "cubic":
+                        sample = torch.randn(shape + (PATCH_CONFIG_DOF[self.config.patch_config],))
+                        if self.config.patch_config_distribution == "sigmoid":
+                            sample = torch.sigmoid(sample)
+                        elif self.config.patch_config_distribution == "cubic":
+                            sample = utils.inverse_cubic(sample)
                     case _:
                         raise ValueError(self.config.patch_config_distribution)
 
@@ -137,6 +120,30 @@ class PredictiveViTEmbeddings(nn.Module):
                         raise ValueError(scale.ndim)
             case _:
                 raise ValueError(self.config.patch_config)
+
+    def latent_to_position(
+        self,
+        x: torch.Tensor,
+        return_orthogonal: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        W = self.position_decoder.weight
+        proj = x @ W.mT
+        if self.position_decoder.bias:
+            y = proj + self.position_decoder.bias
+        else:
+            y = proj
+
+        match self.config.patch_config_distribution:
+            case "uniform" | "sigmoid":
+                y = torch.sigmoid(y)
+            case "cubic":
+                y = utils.inverse_cubic(y)
+
+        if return_orthogonal:
+            orthogonal_x = x - proj @ torch.linalg.pinv(W).mT
+            return y, orthogonal_x
+        else:
+            return y,
 
     def forward(
         self,
@@ -213,40 +220,7 @@ class PredictiveViTPatchEmbeddings(nn.Module):
             nn.ConvTranspose2d(64, num_channels, kernel_size=5, padding=2),     # float: [B... x C x P x P]
         )
 
-    def grid_sample_points(self, patch_config: torch.Tensor, bbox_only: bool = False) -> torch.Tensor:
-        bsz = patch_config.shape[:-1]
-        t = patch_config[..., None, :2]                                 # float: [B... x N x 1 x 2]
-        match self.patch_config:
-            case "translation":
-                I = torch.eye(2).expand(bsz + (2, 2,))                  # float: [B... x N x 2 x 2]
-                D = I * self.default_patch_scale
-
-            case "scaling":
-                I = torch.eye(2).expand(bsz + (2, 2,))                  # float: [B... x N x 2 x 2]
-                D = I * torch.exp(patch_config[..., 2, None, None])
-
-            # case "similarity":
-            #     t = patch_config[..., :2]                               # float: [B... x 2]
-            #     u = patch_config[..., 2:]                               # float: [B... x 2]
-            #     v = torch.stack((-u[..., 1], u[..., 0]), dim=-1)        # float: [B... x 2]
-            #     affine_transform = torch.stack((u, v, t), dim=-2)       # float: [B... x 3 x 2]
-
-            case "non_uniform_scaling":
-                D = torch.diag_embed(torch.exp(torch.clamp_max(patch_config[..., 2:4], 0.0)))   # float: [B... x N x 2 x 2]
-            case _:
-                raise ValueError(self.patch_config)
-            
-        affine_transform = torch.cat((D, t), dim=-2)            # float: [B... x N x 3 x 2]
-
-        if bbox_only:
-            return torch.tensor([
-                [[-1.0, -1.0, 1], [1.0, -1.0, 1],],
-                [[-1.0, 1.0, 1], [1.0, 1.0, 1,]],
-            ]) @ affine_transform[..., None, :, :]                  # float: [B... x N x P x P x 2]
-        else:
-            return self.grid @ affine_transform[..., None, :, :]    # float: [B... x N x P x P x 2]
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
+    def patch_to_latent(self, x: torch.Tensor) -> torch.Tensor:
         bsz = x.shape[:-3]                              # B...
         _x = x.reshape((-1,) + x.shape[-3:])            # float: [B x C x H x W]
         _embd = self.patch_encoder(_x)                  # float: [B x D]
@@ -254,7 +228,7 @@ class PredictiveViTPatchEmbeddings(nn.Module):
 
         return embd
     
-    def decode(self, x: torch.Tensor) -> torch.Tensor:
+    def latent_to_patch(self, x: torch.Tensor) -> torch.Tensor:
         bsz = x.shape[:-1]                              # B...
         _x = x.reshape((-1,) + x.shape[-1:])            # float: [B x D]
         _embd = self.patch_decoder(_x)                  # float: [B x C x H x W]
@@ -262,7 +236,7 @@ class PredictiveViTPatchEmbeddings(nn.Module):
         
         return embd
 
-    def sample_patches(
+    def position_to_patch(
         self,
         pixel_values: torch.Tensor,     # float: [B... x C x H x W]
         patch_config: torch.Tensor,     # float: [B... x N... x ?]
@@ -293,8 +267,8 @@ class PredictiveViTPatchEmbeddings(nn.Module):
                 f" Expected {self.num_channels} but got {num_channels}."
             )
 
-        sample_patches = self.sample_patches(pixel_values, patch_config)        # float: [B... x N... x C x P x P]
-        embeddings = self.encode(sample_patches)                                # float: [B... x N... x D]
+        sample_patches = self.position_to_patch(pixel_values, patch_config)        # float: [B... x N... x C x P x P]
+        embeddings = self.patch_to_latent(sample_patches)                                # float: [B... x N... x D]
         
         bsz = pixel_values.shape[:-3]           # int: B...
         nbsz = patch_config.shape[len(bsz):-1]  # int: N...

@@ -235,6 +235,31 @@ def hadamard_conjugation_diff_order2(
     return torch.sum(P * coeff * C[..., None, None], dim=[-3, -4])
 
 
+class InverseCubic(nn.Module):
+    class _InverseCubic(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, t: torch.Tensor) -> torch.Tensor:
+            c = t * 2.598076211353
+            k = torch.pow(torch.sqrt(torch.square(c) + 1) + c, 0.333333333333)
+            r = k - 1 / k
+            ctx.save_for_backward(r)
+            return 0.577350269190 * r
+
+        @staticmethod
+        def backward(ctx, t: torch.Tensor) -> torch.Tensor:
+            r, = ctx.saved_tensors
+            return t / (torch.square(r) + 1)
+
+    def __init__(self):
+        super().__init__()
+        self.op = InverseCubic._InverseCubic()
+
+    def forward(self, t: torch.Tensor):
+        return self.op.apply(t)
+
+inverse_cubic = InverseCubic._InverseCubic.apply
+
+
 """
 NumPy Array Comprehension Operations
 """
