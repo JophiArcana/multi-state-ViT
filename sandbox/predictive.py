@@ -49,14 +49,16 @@ if __name__ == "__main__":
         _attn_implementation="sdpa",
         use_cls_token=False,
         patch_config="translation",
-        patch_config_distribution="cubic",
-        default_patch_scale=1 / 3,
+        patch_config_distribution="uniform",
+        default_patch_scale=0.4,
+        patch_config_scale=0.7,
         # patch_config_scale=[
         #     [0.7, 0.0],
         #     [0.7, 0.0],
         #     [0.5, -1.0],
         # ],
         patch_size=64,
+        expected_context_length=3,
         pretrained=None,    # base_model_name,
     ))
     print(model)

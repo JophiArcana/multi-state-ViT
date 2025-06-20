@@ -102,24 +102,29 @@ class PredictiveViTEmbeddings(nn.Module):
                         sample = 2 * torch.rand(shape + (PATCH_CONFIG_DOF[self.config.patch_config],)) - 1
                     case "gaussian" | "sigmoid" | "cubic":
                         sample = torch.randn(shape + (PATCH_CONFIG_DOF[self.config.patch_config],))
-                        if self.config.patch_config_distribution == "sigmoid":
-                            sample = torch.sigmoid(sample)
-                        elif self.config.patch_config_distribution == "cubic":
-                            sample = utils.inverse_cubic(sample)
                     case _:
                         raise ValueError(self.config.patch_config_distribution)
-
+                        
                 scale = torch.tensor(self.config.patch_config_scale)
                 match scale.ndim:
                     case 0:
-                        return scale * sample
+                        sample = scale * sample
                     case 2:
                         scale = scale[:PATCH_CONFIG_DOF[self.config.patch_config]]  # float: [? x 2]
-                        return scale[:, 0] * sample + scale[:, 1]
+                        sample = scale[:, 0] * sample + scale[:, 1]
                     case _:
                         raise ValueError(scale.ndim)
+                
+                match self.config.patch_config_distribution:
+                    case "sigmoid":
+                        sample = torch.sigmoid(sample)
+                    case "cubic":
+                        sample = utils.inverse_cubic(sample)
+
             case _:
                 raise ValueError(self.config.patch_config)
+        
+        return sample
 
     def latent_to_position(
         self,
@@ -132,13 +137,8 @@ class PredictiveViTEmbeddings(nn.Module):
             y = proj + self.position_decoder.bias
         else:
             y = proj
-
-        match self.config.patch_config_distribution:
-            case "uniform" | "sigmoid":
-                y = torch.sigmoid(y)
-            case "cubic":
-                y = utils.inverse_cubic(y)
-
+        
+        y = torch.sigmoid(y)
         if return_orthogonal:
             orthogonal_x = x - proj @ torch.linalg.pinv(W).mT
             return y, orthogonal_x
@@ -279,6 +279,7 @@ class PredictiveViTPatchEmbeddings(nn.Module):
         sample_grid = self.grid_sample_points(patch_config, bbox_only=False)                        # float: [B... x N... x P x P x 2]
         _pixel_values = pixel_values.reshape((-1,) + pixel_values.shape[-3:])                       # float: [B x C x H x W]
         _sample_grid = sample_grid.reshape((_pixel_values.shape[0], -1,) + sample_grid.shape[-3:])  # float: [B x N x P x P x 2]
+        
         _sample_patches = torch.vmap(torch.nn.functional.grid_sample, in_dims=(None, 1), out_dims=(1,))(
             _pixel_values, _sample_grid,
             mode="bicubic", padding_mode="zeros", align_corners=True,
