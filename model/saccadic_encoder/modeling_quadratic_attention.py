@@ -5,7 +5,7 @@ import einops
 import torch
 import torch.nn as nn
 
-from configuration_scvit import (
+from .configuration_scvit import (
     SaccadicViTConfig,
 )
 

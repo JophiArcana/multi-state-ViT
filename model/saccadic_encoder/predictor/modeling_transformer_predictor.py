@@ -26,6 +26,7 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
     BaseModelOutput,
 )
+from transformers.models.vit.modeling_vit import ViTAttention
 from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
 
 from ..configuration_scvit import SaccadicViTConfig

@@ -21,8 +21,6 @@ import torch
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
-from .predictor import RefinerImplementationOptions
-
 
 logger = logging.get_logger(__name__)
 
@@ -96,7 +94,7 @@ class SaccadicViTConfig(PretrainedConfig):
         log_covariance_shift: float = torch.inf,
         beam_size: int = 64,
 
-        refiner_implementation: RefinerImplementationOptions = "transformer",
+        refiner_implementation: str = "transformer",
 
         num_hidden_layers: int = 12,
         num_attention_heads: int = 12,

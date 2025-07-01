@@ -97,14 +97,7 @@ class PredictiveViTEmbeddings(nn.Module):
     def sample_initial(self, shape: Tuple[int, ...]) -> torch.Tensor:
         match self.config.patch_config:
             case "translation" | "scaling" | "non-uniform-scaling":
-                match self.config.patch_config_distribution:
-                    case "uniform":
-                        sample = 2 * torch.rand(shape + (PATCH_CONFIG_DOF[self.config.patch_config],)) - 1
-                    case "gaussian" | "sigmoid" | "cubic":
-                        sample = torch.randn(shape + (PATCH_CONFIG_DOF[self.config.patch_config],))
-                    case _:
-                        raise ValueError(self.config.patch_config_distribution)
-                        
+                sample = 2 * torch.rand(shape + (PATCH_CONFIG_DOF[self.config.patch_config],)) - 1                    
                 scale = torch.tensor(self.config.patch_config_scale)
                 match scale.ndim:
                     case 0:
@@ -114,17 +107,10 @@ class PredictiveViTEmbeddings(nn.Module):
                         sample = scale[:, 0] * sample + scale[:, 1]
                     case _:
                         raise ValueError(scale.ndim)
-                
-                match self.config.patch_config_distribution:
-                    case "sigmoid":
-                        sample = torch.sigmoid(sample)
-                    case "cubic":
-                        sample = utils.inverse_cubic(sample)
+                return sample
 
             case _:
                 raise ValueError(self.config.patch_config)
-        
-        return sample
 
     def latent_to_position(
         self,
@@ -138,7 +124,21 @@ class PredictiveViTEmbeddings(nn.Module):
         else:
             y = proj
         
+        # from matplotlib import pyplot as plt
+        # plt.scatter(*y.flatten(0, -2).mT.numpy(force=True))
+        # plt.show()
+        
         y = torch.sigmoid(y)
+        scale = torch.tensor(self.config.patch_config_scale)
+        match scale.ndim:
+            case 0:
+                y = scale * y
+            case 2:
+                scale = scale[:PATCH_CONFIG_DOF[self.config.patch_config]]  # float: [? x 2]
+                y = scale[:, 0] * y + scale[:, 1]
+            case _:
+                raise ValueError(scale.ndim)
+        
         if return_orthogonal:
             orthogonal_x = x - proj @ torch.linalg.pinv(W).mT
             return y, orthogonal_x
@@ -238,7 +238,6 @@ class PredictiveViTPatchEmbeddings(nn.Module):
 
     def grid_sample_points(self, patch_config: torch.Tensor, bbox_only: bool = False) -> torch.Tensor:
         bsz = patch_config.shape[:-1]
-        t = patch_config[..., None, :2]                                 # float: [B... x N x 1 x 2]
         match self.patch_config:
             case "translation":
                 I = torch.eye(2).expand(bsz + (2, 2,))                  # float: [B... x N x 2 x 2]
@@ -259,7 +258,11 @@ class PredictiveViTPatchEmbeddings(nn.Module):
             case _:
                 raise ValueError(self.patch_config)
 
-        affine_transform = torch.cat((D, t), dim=-2)            # float: [B... x N x 3 x 2]
+        t = patch_config[..., :2]                                               # float: [B... x N x 2]
+        restricted_scale = 1 - torch.diagonal(D, offset=0, dim1=-2, dim2=-1)  # float: [B... x N x 2]
+        t = (restricted_scale * t)[..., None, :]                                # float: [B... x N x 1 x 2]
+        
+        affine_transform = torch.cat((D, t), dim=-2)                # float: [B... x N x 3 x 2]
         if bbox_only:
             return torch.tensor([
                 [[-1.0, -1.0, 1], [1.0, -1.0, 1],],
@@ -310,6 +313,10 @@ class PredictiveViTPatchEmbeddings(nn.Module):
         embeddings = _embeddings.view(bsz + nbsz + (-1,))        
 
         return embeddings
+
+
+
+
 
 
 
@@ -815,9 +822,6 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
         pixel_values: torch.Tensor,                             # float: [B... x C x H x W]
         output: BaseModelOutputWithInputs,
         meta: Dict[str, torch.Tensor],
-        # context_lengths: torch.Tensor,                          # int: [B...]
-        # sample_config: torch.Tensor,                            # float: [B... x N x ?]
-        # predicted_sample_config: Optional[torch.Tensor] = None, # float: [B... x (N + 1) x ?]
         context_prediction: bool = False,
         query_prediction: bool = False,
         num_ims: int = 3,
@@ -896,21 +900,30 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
                 if color is not None:
                     ax.plot((-1.0, 1.0, 1.0, -1.0, -1.0), (-0.5, -0.5, 0.5, 0.5, -0.5), color=color, linewidth=4.0,)
 
-            nrows = torch.max(output.context_lengths[:num_ims]).item() + 1
+            nrows = 1 # torch.max(output.context_lengths[:num_ims]).item() + 1
             plt.rcParams["figure.figsize"] = (4.0 * num_ims, 2.0 * nrows,)
             fig, axs = plt.subplots(nrows=nrows, ncols=num_ims)
             for i in range(num_ims):
-                for j in range(output.context_lengths[i]):
+                for j in range(nrows):
                     ax: Axes = axs[j, i] if nrows > 1 else axs[i]
-                    compare_patches(ax, meta["true_context_patch"][i, j], meta["predicted_context_patch"][i, j], color="purple")
-                for j in range(output.context_lengths[i], nrows - 1):
-                    ax: Axes = axs[j, i] if nrows > 1 else axs[i]
-                    ax.axis("off")
-
-                ax: Axes = axs[nrows - 1, i] if nrows > 1 else axs[i]
-                compare_patches(ax, meta["true_query_patch"][i], meta["predicted_query_patch"][i], color="red")
+                    if j == nrows - 1:
+                        compare_patches(ax, meta["true_query_patch"][i], meta["predicted_query_patch"][i], color="red")
+                    elif j < output.context_lengths[i]:
+                        compare_patches(ax, meta["true_context_patch"][i, j], meta["predicted_context_patch"][i, j], color="purple")
+                    else:
+                        ax.axis("off")
             
             fig.suptitle("Sampled patches")
+            plt.show()
+            plt.close()
+            
+            plt.rcParams["figure.figsize"] = (4.0 * num_ims, 2.0,)
+            fig, axs = plt.subplots(nrows=1, ncols=num_ims)
+            for i in range(num_ims):
+                ax: Axes = axs[i]
+                ax.imshow(normalize_im(einops.rearrange(meta["predicted_query_patch"][i], "c h w -> h w c")).numpy(force=True))
+            
+            fig.suptitle("Predicted patches")
             plt.show()
             plt.close()
 

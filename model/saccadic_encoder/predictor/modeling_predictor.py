@@ -40,8 +40,8 @@ from ..configuration_scvit import SaccadicViTConfig
 
 @dataclass
 class BasePatternOutput(ModelOutput):
-    complexity: int                         # int: K
-    data: TensorDict[str, torch.Tensor]
+    complexity: int = None          # int: K
+    data: TensorDict[str, torch.Tensor] = None
     # {
     #     pattern_index             - int: [B... x ?],
     #     node_indices              - int: [B... x ? x K],
@@ -52,6 +52,12 @@ class BasePatternOutput(ModelOutput):
 
 
 class SaccadicViTMultiStatePattern(nn.Module):
+    PATTERN_INDEX = "pattern_index"
+    NODE_INDICES = "node_indices"
+    JOINT_LOG_PDF = "joint_log_pdf"
+    CONDITIONAL_MEAN = "conditional_mean"
+    CONDITIONAL_COVARIANCE = "conditional_covariance"
+    
     def __init__(self, config: SaccadicViTConfig) -> None:
         super().__init__()
         self.num_patterns = config.num_patterns
@@ -81,7 +87,7 @@ class SaccadicViTMultiStatePattern(nn.Module):
         bsz_index = tuple(t[..., None] for t in torch.meshgrid(*map(torch.arange, bsz)))
         wildcard_index: int = -1
 
-        output: OrderedDict[Tuple[int, int], BasePatternOutput] = collections.OrderedDict()
+        output: OrderedDict[Tuple[int, int], BasePatternOutput] = collections.OrderedDict()        
         beam: OrderedDict[int, BasePatternOutput] = collections.OrderedDict([
             (k, BasePatternOutput(
                 complexity=k,
@@ -108,12 +114,13 @@ class SaccadicViTMultiStatePattern(nn.Module):
         it: int = 0
         while len(beam) > 0:
             new_beam: OrderedDict[int, BasePatternOutput] = collections.OrderedDict()
-
+            print("asdf:", beam.keys())
+            
             for n_remaining, E in beam.items():
                 # SECTION: Compute the pairwise PDF between each context token and each marginal by taking the SVD of each marginal component of the covariance
                 # On the first step, search only hidden states to guarantee that each element in the final beam
                 # contains a match to at least one node in the hidden states
-                if it == 0:
+                if it == 0 and hidden_states.shape[-2] > 0:
                     search_states = hidden_states
                 else:
                     search_states = torch.cat((hidden_states, context_states,), dim=-2)
