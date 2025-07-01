@@ -14,19 +14,17 @@
 # limitations under the License.
 """ViT model configuration"""
 
-from typing import Any, Callable, Literal, Sequence
+from typing import Callable
 
 import torch
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
-from ..base_encoder.configuration_base import BaseViTConfig
-
 
 logger = logging.get_logger(__name__)
 
 
-class PredictiveViTConfig(BaseViTConfig):
+class BaseViTConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`ViTModel`]. It is used to instantiate an ViT
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
@@ -73,24 +71,30 @@ class PredictiveViTConfig(BaseViTConfig):
 
     def __init__(
         self,
-        use_cls_token: bool = True,
-        image_size: int = 224,
-        patch_size: int = 64,
-        patch_config: str = "scaling",
-        default_patch_scale: float = 0.5,
-        patch_config_distribution: Literal["uniform", "gaussian", "sigmoid", "cubic"] = "uniform",
-        patch_config_scale: float | Sequence[Any] | torch.Tensor = 1.0,
-        pe_bias: bool = False,
-        expected_context_length: float = 2.0,
+        pretrained: str = None,
+        hidden_size: int = 768,
+        num_hidden_layers: int = 12,
+        num_attention_heads: int = 12,
+        intermediate_size: int = 3072,
+        hidden_act: str | Callable[[torch.Tensor], torch.Tensor] = "gelu",
+        hidden_dropout_prob: float = 0.0,
+        attention_probs_dropout_prob: float = 0.0,
+        initializer_range: float = 0.02,
+        layer_norm_eps: float = 1e-12,
+        num_channels: int = 3,
+        qkv_bias: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.use_cls_token = use_cls_token
-        self.image_size = image_size
-        self.patch_size = patch_size
-        self.patch_config = patch_config
-        self.default_patch_scale = default_patch_scale
-        self.patch_config_distribution = patch_config_distribution
-        self.patch_config_scale = patch_config_scale
-        self.pe_bias = pe_bias
-        self.expected_context_length = expected_context_length
+        self.pretrained = pretrained
+        self.hidden_size = hidden_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.intermediate_size = intermediate_size
+        self.hidden_act = hidden_act
+        self.hidden_dropout_prob = hidden_dropout_prob
+        self.attention_probs_dropout_prob = attention_probs_dropout_prob
+        self.initializer_range = initializer_range
+        self.layer_norm_eps = layer_norm_eps
+        self.num_channels = num_channels
+        self.qkv_bias = qkv_bias

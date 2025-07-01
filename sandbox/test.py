@@ -94,7 +94,7 @@ if __name__ == "__main__":
     print(a.dtype, a.shape)
 
     print()
-    print(model.vision_model.embeddings(inputs["pixel_values"]).shape)
+    print(model.vision_model.patch_embed(inputs["pixel_values"]).shape)
     raise Exception()
 
     affinity_focal_gamma = 1.0
