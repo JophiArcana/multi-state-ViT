@@ -14,7 +14,7 @@
 # limitations under the License.
 """ViT model configuration"""
 
-from typing import Any, Callable, Literal, Sequence
+from typing import Callable, Literal
 
 import torch
 from transformers.configuration_utils import PretrainedConfig
@@ -26,7 +26,7 @@ from ..base_encoder.configuration_base import BaseViTConfig
 logger = logging.get_logger(__name__)
 
 
-class PredictiveViTConfig(BaseViTConfig):
+class SubsampleViTConfig(BaseViTConfig):
     r"""
     This is the configuration class to store the configuration of a [`ViTModel`]. It is used to instantiate an ViT
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
@@ -73,24 +73,14 @@ class PredictiveViTConfig(BaseViTConfig):
 
     def __init__(
         self,
-        use_cls_token: bool = True,
-        image_size: int = 224,
-        patch_size: int = 64,
-        patch_config: str = "scaling",
-        default_patch_scale: float = 0.5,
-        patch_config_distribution: Literal["uniform", "gaussian", "sigmoid", "cubic"] = "uniform",
-        patch_config_scale: float | Sequence[Any] | torch.Tensor = 1.0,
-        pe_bias: bool = False,
-        expected_context_length: float = 2.0,
+        initial_grid_size: int = 4,
+        multiplicative_grid_size: int = 2,
+        nesting_mode: Literal["open", "lock", "freeze"] = "open",
+        use_weighted_tokens: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.use_cls_token = use_cls_token
-        self.image_size = image_size
-        self.patch_size = patch_size
-        self.patch_config = patch_config
-        self.default_patch_scale = default_patch_scale
-        self.patch_config_distribution = patch_config_distribution
-        self.patch_config_scale = patch_config_scale
-        self.pe_bias = pe_bias
-        self.expected_context_length = expected_context_length
+        self.initial_grid_size = initial_grid_size
+        self.multiplicative_grid_size = multiplicative_grid_size
+        self.nesting_mode = nesting_mode
+        self.use_weighted_tokens = use_weighted_tokens

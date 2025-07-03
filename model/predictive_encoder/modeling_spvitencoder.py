@@ -46,9 +46,9 @@ from transformers.utils import (
     # torch_int,
 )
 
-from model.predictive_encoder.configuration_spvit import PredictiveViTConfig
-from infrastructure import utils
-from infrastructure.settings import RUNTIME_MODE
+from ..base_encoder.modeling_base import BaseViTEncoder
+from ..predictive_encoder.configuration_spvit import PredictiveViTConfig
+from ...infrastructure import utils
 
 
 logger = logging.get_logger(__name__)
@@ -184,7 +184,7 @@ class PredictiveViTPatchEmbeddings(nn.Module):
         self.grid: torch.Tensor = torch.stack(torch.meshgrid(
             torch.linspace(-1.0, 1.0, patch_size),
             torch.linspace(-1.0, 1.0, patch_size),
-        ) + (torch.ones((patch_size, patch_size)),), dim=-1).transpose(dim0=-3, dim1=-2)    # float: [P x P x 3]
+        ) + (torch.ones((patch_size, patch_size)),), dim=-1)            # float: [P x P x 3]
 
         num_channels, patch_size, hidden_size = config.num_channels, config.patch_size, config.hidden_size
         self.num_channels = num_channels
@@ -284,11 +284,11 @@ class PredictiveViTPatchEmbeddings(nn.Module):
         _sample_grid = sample_grid.reshape((_pixel_values.shape[0], -1,) + sample_grid.shape[-3:])  # float: [B x N x P x P x 2]
         
         _sample_patches = torch.vmap(torch.nn.functional.grid_sample, in_dims=(None, 1), out_dims=(1,))(
-            _pixel_values, _sample_grid,
-            mode="bicubic", padding_mode="zeros", align_corners=True,
+            _pixel_values, torch.flip(_sample_grid, dims=(-1,)),
+            mode="bicubic", padding_mode="border", align_corners=False,
         )                                                                                           # float: [B x N x C x P x P]
         sample_patches = _sample_patches.reshape(bsz + nbsz + _sample_patches.shape[-3:])
-        
+
         return sample_patches
 
     def forward(
@@ -340,302 +340,6 @@ class PredictiveViTPatchEmbeddings(nn.Module):
 
 
 
-
-
-
-
-
-
-
-
-class PredictiveViTSelfAttention(nn.Module):
-    def __init__(self, config: PredictiveViTConfig) -> None:
-        super().__init__()
-        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
-            raise ValueError(
-                f"The hidden size {config.hidden_size,} is not a multiple of the number of attention "
-                f"heads {config.num_attention_heads}."
-            )
-
-        self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
-
-        self.query = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size, bias=config.qkv_bias)
-
-        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
-
-    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
-        return einops.rearrange(x, "... n (h d) -> ... h n d", h=self.num_attention_heads)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-        query_layer = self.transpose_for_scores(self.query(hidden_states))
-        key_layer = self.transpose_for_scores(self.key(hidden_states))
-        value_layer = self.transpose_for_scores(self.value(hidden_states))
-
-        # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = query_layer @ key_layer.mT
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-
-        # Apply manual attention mask
-        if attention_mask is not None:
-            attention_scores = torch.where(attention_mask[..., None, :, :], attention_scores, -torch.inf)
-
-        # Normalize the attention scores to probabilities.
-        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs = self.dropout(attention_probs)
-
-        context_layer = attention_probs @ value_layer
-        context_layer = einops.rearrange(context_layer, "... h n d -> ... n (h d)")
-
-        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
-
-        return outputs
-
-
-class PredictiveViTSdpaSelfAttention(PredictiveViTSelfAttention):
-    def __init__(self, config: PredictiveViTConfig) -> None:
-        super().__init__(config)
-        self.attention_probs_dropout_prob = config.attention_probs_dropout_prob
-
-    def forward(
-        self,
-        hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-        if output_attentions:
-            logger.warning_once(
-                "`ViTSdpaAttention` is used but `torch.nn.functional.scaled_dot_product_attention` does not support "
-                "`output_attentions=True` or `head_mask`. Falling back to the manual attention implementation, but "
-                "specifying the manual implementation will be required from Transformers version v5.0.0 onwards. "
-                'This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-            )
-            return super().forward(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                output_attentions=output_attentions,
-            )
-
-        mixed_query_layer = self.query(hidden_states)
-
-        key_layer = self.transpose_for_scores(self.key(hidden_states))
-        value_layer = self.transpose_for_scores(self.value(hidden_states))
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-
-        context_layer = torch.nn.functional.scaled_dot_product_attention(
-            query_layer,
-            key_layer,
-            value_layer,
-            attn_mask=attention_mask[..., None, :],
-            dropout_p=self.attention_probs_dropout_prob if self.training else 0.0,
-            is_causal=False,
-            scale=None,
-        )
-        context_layer = einops.rearrange(context_layer, "... h n hd -> ... n (h hd)")
-
-        return context_layer, None
-
-
-class PredictiveViTSelfOutput(nn.Module):
-    """
-    The residual connection is defined in ViTLayer instead of here (as is the case with other models), due to the
-    layernorm applied before each block.
-    """
-
-    def __init__(self, config: PredictiveViTConfig) -> None:
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-
-        return hidden_states
-
-
-class PredictiveViTAttention(nn.Module):
-    def __init__(self, config: PredictiveViTConfig) -> None:
-        super().__init__()
-        self.attention = PredictiveViTSelfAttention(config)
-        self.output = PredictiveViTSelfOutput(config)
-        self.pruned_heads = set()
-
-    def prune_heads(self, heads: Set[int]) -> None:
-        if len(heads) == 0:
-            return
-        heads, index = find_pruneable_heads_and_indices(
-            heads, self.attention.num_attention_heads, self.attention.attention_head_size, self.pruned_heads
-        )
-
-        # Prune linear layers
-        self.attention.query = prune_linear_layer(self.attention.query, index)
-        self.attention.key = prune_linear_layer(self.attention.key, index)
-        self.attention.value = prune_linear_layer(self.attention.value, index)
-        self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
-
-        # Update hyper params and store pruned heads
-        self.attention.num_attention_heads = self.attention.num_attention_heads - len(heads)
-        self.attention.all_head_size = self.attention.attention_head_size * self.attention.num_attention_heads
-        self.pruned_heads = self.pruned_heads.union(heads)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-        self_outputs = self.attention(hidden_states, attention_mask, output_attentions)
-
-        attention_output = self.output(self_outputs[0], hidden_states)
-
-        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
-        return outputs
-
-
-class PredictiveViTSdpaAttention(PredictiveViTAttention):
-    def __init__(self, config: PredictiveViTConfig) -> None:
-        super().__init__(config)
-        self.attention = PredictiveViTSdpaSelfAttention(config)
-
-
-class PredictiveViTIntermediate(nn.Module):
-    def __init__(self, config: PredictiveViTConfig) -> None:
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
-        if isinstance(config.hidden_act, str):
-            self.intermediate_act_fn = ACT2FN[config.hidden_act]
-        else:
-            self.intermediate_act_fn = config.hidden_act
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.intermediate_act_fn(hidden_states)
-
-        return hidden_states
-
-
-class PredictiveViTOutput(nn.Module):
-    def __init__(self, config: PredictiveViTConfig) -> None:
-        super().__init__()
-        self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-
-        hidden_states = hidden_states + input_tensor
-
-        return hidden_states
-
-
-SPVIT_ATTENTION_CLASSES = {
-    "eager": PredictiveViTAttention,
-    "sdpa": PredictiveViTSdpaAttention,
-}
-
-
-class PredictiveViTLayer(nn.Module):
-    """This corresponds to the Block class in the timm implementation."""
-
-    def __init__(self, config: PredictiveViTConfig) -> None:
-        super().__init__()
-        self.chunk_size_feed_forward = config.chunk_size_feed_forward
-        self.seq_len_dim = 1
-        self.attention = SPVIT_ATTENTION_CLASSES[config._attn_implementation](config)
-        self.intermediate = PredictiveViTIntermediate(config)
-        self.output = PredictiveViTOutput(config)
-        self.layernorm_before = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-        self_attention_outputs = self.attention(
-            self.layernorm_before(hidden_states),  # in ViT, layernorm is applied before self-attention
-            attention_mask=attention_mask,
-            output_attentions=output_attentions,
-        )
-        attention_output = self_attention_outputs[0]
-        outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
-
-        # first residual connection
-        hidden_states = attention_output + hidden_states
-
-        # in ViT, layernorm is also applied after self-attention
-        layer_output = self.layernorm_after(hidden_states)
-        layer_output = self.intermediate(layer_output)
-
-        # second residual connection is done here
-        layer_output = self.output(layer_output, hidden_states)
-
-        outputs = (layer_output,) + outputs
-
-        return outputs
-
-
-class PredictiveViTEncoder(nn.Module):
-    def __init__(self, config: PredictiveViTConfig) -> None:
-        super().__init__()
-        self.config = config
-        self.layer = nn.ModuleList([PredictiveViTLayer(config) for _ in range(config.num_hidden_layers)])
-        self.gradient_checkpointing = False
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
-    ) -> Union[tuple, BaseModelOutput]:
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attentions = () if output_attentions else None
-
-        for i, layer_module in enumerate(self.layer):
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
-
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    layer_module.__call__,
-                    hidden_states,
-                    attention_mask,
-                    output_attentions,
-                )
-            else:
-                layer_outputs = layer_module(hidden_states, attention_mask, output_attentions)
-
-            hidden_states = layer_outputs[0]
-
-            if output_attentions:
-                all_self_attentions = all_self_attentions + (layer_outputs[1],)
-
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, all_hidden_states, all_self_attentions] if v is not None)
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attentions,
-        )
 
 
 
@@ -708,7 +412,7 @@ class PredictiveViTPreTrainedModel(PreTrainedModel):
     base_model_prefix = "vit"
     main_input_name = "pixel_values"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["PredictiveViTEmbeddings", "ViTLayer"]
+    _no_split_modules = ["PredictiveViTEmbeddings", "BaseViTLayer"]
     _supports_sdpa = True
 
     def _init_weights(self, module: Union[nn.Linear, nn.Conv2d, nn.LayerNorm]) -> None:
@@ -784,7 +488,7 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
         self.config = config
 
         self.embeddings = PredictiveViTEmbeddings(config)
-        self.encoder = PredictiveViTEncoder(config)
+        self.encoder = BaseViTEncoder(config)
 
         self.batchnorm = nn.BatchNorm1d(config.hidden_size, affine=False)
         # self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -815,7 +519,7 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
         class PreTrainedModel
         """
         for layer, heads in heads_to_prune.items():
-            self.encoder.layer[layer].attention.prune_heads(heads)
+            self.encoder.blocks[layer].attn.prune_heads(heads)
 
     def visualize_sample(
         self,
@@ -978,7 +682,7 @@ class PredictiveViTModel(PredictiveViTPreTrainedModel):
 
         encoder_outputs: BaseModelOutput = self.encoder(
             embedding_output,
-            attention_mask=attention_mask[..., None, :],
+            attention_mask=attention_mask[..., None, None, :],
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,

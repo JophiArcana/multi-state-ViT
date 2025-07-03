@@ -681,7 +681,7 @@ class MultiStateViTEncoderModel(MultiStateViTEncoderPreTrainedModel):
         if self.config.pretrained is not None:
             base_model = ViTModel.from_pretrained(self.config.pretrained)
             self.embeddings.load_state_dict(base_model.embeddings.state_dict())
-            self.backbone.layer.load_state_dict(base_model.encoder.layer.state_dict())
+            self.backbone.layer.load_state_dict(base_model.encoder.blocks.state_dict())
             
             cls_token = base_model.embeddings.cls_token.data[0, 0]
             self.backbone.transmitter_token.__init__(cls_token)
