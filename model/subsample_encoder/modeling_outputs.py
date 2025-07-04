@@ -48,7 +48,7 @@ class BaseModelOutputWithLog(ModelOutput):
 
     last_hidden_state: torch.FloatTensor = None                             # float: [B... x (max_N + 1) x D]
     last_valid_mask: torch.BoolTensor = None                                # bool: [B... x max_N]
-    probability: torch.FloatTensor = None                                   # float: [B...]
+    log_prob: torch.FloatTensor = None                                      # float: [B...]
 
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None           # float: I x (L x [B... x (max_N + 1) x D])
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None              # float: I x (L x [B... x H x (max_N + 1) x (max_N + 1)])

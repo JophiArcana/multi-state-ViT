@@ -9,4 +9,7 @@ from .modeling_ssvit import (
     SubsampleViTForImageClassification,
 )
 # from .modeling_training import training_loss
+from .visualize import (
+    visualize_subsample_vit_output,
+)
 

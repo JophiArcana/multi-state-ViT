@@ -386,16 +386,16 @@ class SubsampleViTModel(SubsampleViTPreTrainedModel):
             **({PIXEL_VALUES: _pixel_values} if kwargs["pixel_values"] else {}),                        # float: [B... x max_N x C x P x P]
         }, batch_size=bsz + (G,)).auto_device_()        # TensorDict: [B... x max_N x ?...]
 
-        def binary_projection(x: torch.Tensor, return_logits: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-            weights = self.projection.forward(x).squeeze(-1)
-            r = Fn.gumbel_softmax(
-                torch.stack((weights, torch.zeros_like(weights)), dim=-1),
-                tau=tau, hard=False, dim=-1,
-            )
-            return r, (weights if return_logits else None),
+        def binary_projection(x: torch.Tensor, return_logits: bool = False) -> Tuple[torch.BoolTensor, torch.FloatTensor, Optional[torch.FloatTensor]]:
+            weights = self.projection.forward(x).squeeze(-1)                    # float: [B...]
+            logits = torch.stack((torch.zeros_like(weights), weights), dim=-1)  # float: [B... x 2]
+            dist = torch.distributions.categorical.Categorical(logits=logits)
+            r = dist.sample().to(torch.bool)                                    # bool: [B...]
+            log_prob = dist.log_prob(r)                                         # float: [B...]
+            return r, log_prob, (weights if return_logits else None),
 
         it, convergence_mask = 0, torch.full(bsz + (G,), True)
-        cumulative_probs = torch.ones(bsz)
+        cumulative_log_prob = torch.zeros(bsz)
 
         output_log = {k: () for k in _output_keys}
 
@@ -461,11 +461,10 @@ class SubsampleViTModel(SubsampleViTPreTrainedModel):
             else:
                 raise ValueError(self.config.nesting_mode)
 
-            mask, logits = binary_projection(T[PREVIOUS_HIDDEN_STATES][..., -1, :], return_logits=kwargs["subsample_logits"])
-            
-            subsample_mask = (mask[..., 0] == 1.0) * convergence_mask
+            mask, log_prob, logits = binary_projection(T[PREVIOUS_HIDDEN_STATES][..., -1, :], return_logits=kwargs["subsample_logits"])
+            subsample_mask = mask * convergence_mask
             if self.config.nesting_mode in ["lock", "freeze"]:
-                T[LOCK] += (mask[..., 0] == 0.0)
+                T[LOCK] += ~mask
                 
             if kwargs["subsample_logits"]:
                 T[SUBSAMPLE_LOGITS][convergence_mask] = logits[convergence_mask]
@@ -489,9 +488,7 @@ class SubsampleViTModel(SubsampleViTPreTrainedModel):
  
             if it < max_depth: 
                 # DONE: Update the cumulative probabilities
-                probs = torch.max(mask, dim=-1).values                                                  # float: [B... x max_N]
-                probs = torch.prod(torch.where(convergence_mask, probs, 1.0), dim=-1)                   # float: [B...]
-                cumulative_probs = cumulative_probs * probs
+                cumulative_log_prob = cumulative_log_prob + torch.sum(convergence_mask * log_prob, dim=-1)
                                 
                 # DONE: Use subsample mask to update corners, input_state, previous_hidden_states, valid_mask, lock, depth
                 subsample_indices, subsample_count, subsample_max_count = mask_to_indices(subsample_mask)   # int: [B... x max_S], [B...], max_S
@@ -535,7 +532,7 @@ class SubsampleViTModel(SubsampleViTPreTrainedModel):
         return BaseModelOutputWithLog(
             last_hidden_state=sequence_output,
             last_valid_mask=T[VALID_MASK],
-            probability=cumulative_probs,
+            log_prob=cumulative_log_prob,
             **output_log,
         )
 
